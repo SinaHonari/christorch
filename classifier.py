@@ -70,12 +70,17 @@ class Classifier():
                  net_fn_params,
                  in_shp,
                  num_classes,
+                 loss_name='x-ent',
                  opt=optim.Adam, opt_args={'lr':1e-3, 'betas':(0.9, 0.999)},
+                 l2_decay=0.,
                  metrics={},
                  hooks={},
                  gpu_mode=False,
                  verbose=True):
         """
+        loss_name: either 'x-ent' (cross-entropy) or 'emd2' (squared earth
+          mover's distance). The latter is only appropriate if
+          ordinal classification is being performed.
         metrics: a dict of the form {metric_name: metric_fn}, where
           `metric_fn` is a function that takes a minibatch of pdists
           (bs, k) and a minibatch of ground truths (k,) and returns
@@ -86,17 +91,27 @@ class Classifier():
           This can be useful for spitting out auxiliary information
           somewhere during training.
         """
+        assert loss_name in ['x-ent', 'emd2']
         self.in_shp = in_shp
         self.num_classes = num_classes
+        self.loss_name = loss_name
         self.verbose = verbose
         self.l_out = net_fn(in_shp, num_classes, **net_fn_params)
-        self.optim = opt(self.l_out.parameters(), **opt_args)
+        self.optim = opt(self.l_out.parameters(), weight_decay=l2_decay, **opt_args)
         self.metrics = metrics
         self.hooks = hooks
         self.loss = F.nll_loss
         self.gpu_mode = gpu_mode
+        if self.loss_name == 'emd2':
+            from architectures.extensions import CMF
+            self.l_pmf = CMF(self.num_classes)
+        else:
+            self.l_pmf = None
         if self.gpu_mode:
             self.l_out.cuda()
+            if self.l_pmf != None:
+                self.l_pmf.cuda()
+            
     def train(self, itr_train, itr_valid, epochs, model_dir, result_dir, resume=False, max_iters=None, save_every=1, verbose=True):
         """
         If a results directory is specified, this will:
@@ -146,6 +161,7 @@ class Classifier():
                 all_ys, all_pdist = [], [] # accumulate labels, pdists
                 for b in tqdm(range(num_batches)):
                     X_batch, y_batch = itr.next()
+                    y_batch_orig = y_batch
                     for key in self.hooks.keys():
                         self.hooks[key](X_batch, y_batch, epoch+1)
                     X_batch, y_batch = torch.from_numpy(X_batch).float(), torch.from_numpy(y_batch).long()
@@ -159,7 +175,24 @@ class Classifier():
                     # compute output of network
                     out = F.log_softmax(self.l_out(X_batch))
                     pdist = torch.exp(out)
-                    loss = self.loss(out, y_batch)
+                    if self.loss == 'x-ent':
+                        loss = self.loss(out, y_batch)
+                    else:
+                        # TODO: clean this up. maybe move the loss
+                        # computation to another method
+                        # create a one-hot y_batch as well
+                        y_batch_onehot = np.zeros((len(y_batch), self.num_classes), dtype="float32")
+                        y_batch_onehot[ np.arange(0, len(y_batch)), y_batch_orig ] = 1.
+                        y_batch_onehot = torch.from_numpy(y_batch_onehot).float()
+                        if self.gpu_mode:
+                            y_batch_onehot = y_batch_onehot.cuda()
+                        y_batch_onehot = Variable(y_batch_onehot)
+                        #import pdb
+                        #pdb.set_trace()
+                        cmf_pdist = self.l_pmf(pdist)
+                        cmf_y = self.l_pmf(y_batch_onehot)
+                        # compute the squared L2 norm
+                        loss = torch.mean(torch.sum((cmf_pdist-cmf_y)**2,dim=1))
                     tmp_stats['%s_loss' % mode].append(loss.data[0])
                     if mode == 'train':
                         loss.backward()
@@ -243,4 +276,30 @@ if __name__ == '__main__':
             import pdb
             pdb.set_trace()
 
+    def test_emd2(mode):
+        assert mode in ['train', 'test']
+        from architectures import resnet
+        from metrics import acc, acc_exp, mae, mae_exp, lwk
+        from hooks import get_dump_images
+        cls = Classifier(
+            net_fn=resnet.resnet18,
+            net_fn_params={},
+            in_shp=256, num_classes=101,
+            loss_name='emd2',
+            metrics=OrderedDict({'acc':acc, 'acc_exp': acc_exp, 'mae':mae, 'mae_exp': mae_exp, 'lwk':lwk}),
+            hooks={'dump_images': get_dump_images(5, "tmp")},
+            gpu_mode=True)
+        print cls
+        name = "test_emd2.s2"
+        itr_train, itr_valid = get_wiki_iterators(196)
+        if mode == "train":
+            cls.train(itr_train=itr_train,
+                      itr_valid=itr_valid,
+                      epochs=100,
+                      model_dir="models/%s" % name,
+                      result_dir="results/%s" % name,
+                      save_every=5, resume=True)
+
+
+            
     locals()[sys.argv[1]]( sys.argv[2] )
