@@ -1,8 +1,8 @@
 import torch
 import numpy as np
 from torchvision import transforms
-
-
+from torchvision.datasets import ImageFolder
+from torch.utils.data import DataLoader
 
 
 """
@@ -172,9 +172,32 @@ class ClassifierIterator():
         return aug_x    
 
 
+def test_image_folder(batch_size):
+    loader = ImageFolder("/data/lisa/data/beckhamc/dr-data/train_sample")
+    train_loader = DataLoader(
+        loader, batch_size=batch_size, shuffle=True, num_workers=-1)
+    return train_loader
 
+def int_to_ord(labels, num_classes):
+    """
+    Convert integer label to ordinal label.
+    """
+    ords = np.ones((len(labels), num_classes-1))
+    for i in range(len(labels)):
+        if labels[i]==0:
+            continue
+        ords[i][0:labels[i]] *= 0.
+    return ords
 
 if __name__ == '__main__':
-    scale = transforms.Scale(255)
+    #scale = transforms.Scale(255)
+    #loader = test_image_folder(2)
+    #for data in loader:
+    #    aa,bb = data
+
+    labels = np.asarray([0,1,2,3,4])
+    tmp = int_to_ord(labels, 5)
+    
+    
     import pdb
     pdb.set_trace()

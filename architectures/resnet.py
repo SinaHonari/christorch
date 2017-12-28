@@ -86,31 +86,74 @@ class ResNet18(nn.Module):
         self.classifier = nn.Linear(512 * self.features.block.expansion, num_classes)
     def forward(self, x):
         x = self.features(x)
-        print x.size()
         x = self.classifier(x)
         return x
 
-def resnet18_test(in_shp, num_classes):
-    return nn.Sequential( ResNetCore(BasicBlock, [2,2,2,2]), nn.Linear(512, num_classes))
+from extensions import BinomialExtension
+
+class BinomialResNet18(nn.Module):
+    def __init__(self, in_shp, num_classes, learn_tau='none', extra_fc=False):
+        """
+        extra_fc: add an extra intermediate layer before the binomial extension,
+          with `num_classes` units?
+        """
+        super(BinomialResNet18, self).__init__()
+        features = ResNetCore(block=BasicBlock, layers=[2,2,2,2])
+        if extra_fc:
+            self.features = nn.Sequential(features, nn.Linear(512, num_classes), nn.ReLU())
+            self.classifier = BinomialExtension(num_classes, num_classes, learn_tau=learn_tau)
+        else:
+            self.features = features
+            self.classifier = BinomialExtension(512, num_classes, learn_tau=learn_tau)
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
+
+from extensions import POM
+    
+class PomResNet18(nn.Module):
+    """
+    Proportional odds model applied to the end of a ResNet18 feature
+      extractor.
+    """
+    def __init__(self, in_shp, num_classes, nonlinearity='linear', extra_fc=False):
+        """
+        extra_fc: add an extra intermediate layer before the binomial extension,
+          with `num_classes` units?
+        """
+        super(PomResNet18, self).__init__()
+        features = ResNetCore(block=BasicBlock, layers=[2,2,2,2])
+        # cumulative has k-1 units, but when the class converts them to
+        # discrete probs we get the k units back
+        if extra_fc:
+            self.features = nn.Sequential(features, nn.Linear(512, num_classes), nn.ReLU())
+            self.classifier = POM(num_classes, num_classes, nonlinearity=nonlinearity)
+        else:
+            self.features = features
+            self.classifier = POM(512, num_classes, nonlinearity=nonlinearity)
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
     
 def resnet18(in_shp, num_classes, **kwargs):
     """This works, but why doesn't the above work???"""
     model = resnet.resnet18(pretrained=False, num_classes=num_classes)
     return model
 
+
 if __name__ == '__main__':
-    #net = resnet18(256, 100)
-    #print net
-    import numpy as np
     import torch
     from torch.autograd import Variable
-    #model = resnet18(256, 101)
-    model = ResNet18(256, 101)
-    #model = resnet18_test(256, 101)
-    num_p = np.sum([ np.prod(np.asarray(elem.size())) for elem in model.parameters() ])
+    import numpy as np
+    net = PomResNet18(256, 5, extra_fc=False)
     x_fake = np.random.normal(0,1,size=(1,3,256,256))
-    x_fake = torch.from_numpy(x_fake).float()
-    x_fake = Variable(x_fake)
+    x_fake = Variable(torch.from_numpy(x_fake).float())
+    out = net(x_fake)
+    loss = torch.mean(out)
+    loss.backward()
+    
+    print net
     import pdb
     pdb.set_trace()
-    

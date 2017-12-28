@@ -9,7 +9,7 @@ def get_dump_images(how_many, out_folder):
     """
     def dump_images(X_batch, y_batch, epoch):
         size = X_batch.shape[-1]
-        grid = np.zeros((size, size*how_many, 3))
+        grid = np.zeros((size, size*how_many, 3), dtype=X_batch.dtype)
         if epoch == 1:
             # only run on the first epoch
             for i in range(how_many):

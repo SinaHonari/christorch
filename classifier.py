@@ -9,10 +9,10 @@ from torchvision import datasets, transforms
 from collections import OrderedDict
 import os
 import sys
+import math
 from tqdm import tqdm
 import h5py
 import util
-from keras.preprocessing.image import ImageDataGenerator #TODO
 
 class FakeIterator():
     def __init__(self, inp_shape, num_classes):
@@ -31,35 +31,8 @@ class FakeIterator():
     def next(self):
         return self.fn.next()
 
-def get_wiki_iterators(batch_size):
-    """
-    NOTE: the OS environment variable H5_WIKI must be set!!!
-    """
-    def preproc(img):
-        img = util.min_max_then_tanh(img, )
-        # random crops can work within the preprocessor
-        # so long as the original img size does not change,
-        # e.g. if you crop a smaller chunk from 256px you must
-        # upsize it back to 256px
-        img = util.rnd_crop(img, data_format='channels_last')
-        return img
-    def minimal_preproc(img):
-        img = util.min_max_then_tanh(img, )
-        return img
-    h5 = os.environ['H5_WIKI']
-    channels_mode = 'channels_last'
-    dataset = h5py.File(h5,"r")
-    imgen = ImageDataGenerator(horizontal_flip=True, data_format=channels_mode, preprocessing_function=preproc)
-    it_train = util.ClassifierIterator(X_arr=dataset['xt'], y_arr=dataset['yt'],
-                                bs=batch_size, imgen=imgen, mode='old',
-                                rnd_state=np.random.RandomState(0),
-                                data_format=channels_mode)
-    it_val = util.ClassifierIterator(X_arr=dataset['xv'], y_arr=dataset['yv'],
-                                bs=batch_size, imgen=imgen, mode='old',
-                                rnd_state=np.random.RandomState(0),
-                                data_format=channels_mode)
-    return it_train, it_val
-
+from memory_profiler import profile
+    
 class Classifier():
     def num_parameters(self):
         return np.sum([ np.prod(np.asarray(elem.size())) for elem in self.l_out.parameters() ])
@@ -75,12 +48,11 @@ class Classifier():
                  l2_decay=0.,
                  metrics={},
                  hooks={},
-                 gpu_mode=False,
+                 gpu_mode='detect',
                  verbose=True):
         """
-        loss_name: either 'x-ent' (cross-entropy) or 'emd2' (squared earth
-          mover's distance). The latter is only appropriate if
-          ordinal classification is being performed.
+        loss_name: either 'x-ent' (cross-entropy), 'emd2' (squared earth
+          mover's distance), or 'bce' (binary cross-entropy).
         metrics: a dict of the form {metric_name: metric_fn}, where
           `metric_fn` is a function that takes a minibatch of pdists
           (bs, k) and a minibatch of ground truths (k,) and returns
@@ -90,33 +62,44 @@ class Classifier():
           and gets called every minibatch, and performs some function.
           This can be useful for spitting out auxiliary information
           somewhere during training.
+        gpu_mode: if `True`, we assume GPU mode is enabled. This can
+          also be set to the string `autodetect`, which will automatically
+          enable the mode if a GPU is detected.
         """
-        assert loss_name in ['x-ent', 'emd2']
+        assert loss_name in ['x-ent', 'emd2', 'bce']
+        assert gpu_mode in [True, False, 'detect']
+        if gpu_mode == 'detect':
+            gpu_mode = True if torch.cuda.is_available() else False
         self.in_shp = in_shp
         self.num_classes = num_classes
         self.loss_name = loss_name
         self.verbose = verbose
         self.l_out = net_fn(in_shp, num_classes, **net_fn_params)
-        self.optim = opt(self.l_out.parameters(), weight_decay=l2_decay, **opt_args)
+        # https://github.com/pytorch/pytorch/issues/1266
+        params = filter(lambda x: x.requires_grad, self.l_out.parameters())
+        #params = self.l_out.parameters()
+        self.optim = opt(params, weight_decay=l2_decay, **opt_args)
         self.metrics = metrics
         self.hooks = hooks
-        self.loss = F.nll_loss
         self.gpu_mode = gpu_mode
         if self.loss_name == 'emd2':
             from architectures.extensions import CMF
             self.l_pmf = CMF(self.num_classes)
-        else:
-            self.l_pmf = None
+            if self.gpu_mode:
+                self.l_pmf.cuda()
+        elif self.loss_name == 'bce':
+            from architectures.extensions import CumulativeToDiscrete
+            self.l_ctd = CumulativeToDiscrete(self.num_classes-1)
+            if self.gpu_mode:
+                self.l_ctd.cuda()
         if self.gpu_mode:
             self.l_out.cuda()
-            if self.l_pmf != None:
-                self.l_pmf.cuda()
-            
+
     def train(self, itr_train, itr_valid, epochs, model_dir, result_dir, resume=False, max_iters=None, save_every=1, verbose=True):
         """
         If a results directory is specified, this will:
         - Save a CSV file (results.txt) with per-epoch statistics for training/validation.
-        - Save a CSv file (valid_preds.txt) with predicted prob. dists on the validation set.
+        - Save a CSV file (valid_preds.txt) with predicted prob. dists on the validation set.
         itr_train: iterator for training. It is assumed this loops infinitely, and has the two fields `N`
           (total number of instances) and `bs` (batch size).
         itr_valid: same as above, but for validatioh.
@@ -133,7 +116,7 @@ class Classifier():
                 os.makedirs(folder_name)
         f = open("%s/results.txt" % result_dir, "wb" if not resume else "a") if result_dir != None else None
         start_time = time.time()
-        stats_keys = ['epoch', 'train_loss', 'valid_loss', 'time']
+        stats_keys = ['epoch', 'train_loss', 'valid_loss', 'lr', 'time']
         for epoch in range(epochs):
             ####
             stats = OrderedDict({})
@@ -142,6 +125,10 @@ class Classifier():
             for key in self.metrics.keys():
                 stats["%s_%s" % ('train', key)] = None
                 stats["%s_%s" % ('valid', key)] = None
+                if self.loss_name == 'bce':
+                    # add a new way of doing prediction
+                    stats["%s_%s_bin" % ('train', key)] = None
+                    stats["%s_%s_bin" % ('valid', key)] = None
             ####
             stats['epoch'] = epoch+1
             if (epoch+1) == 1:
@@ -157,7 +144,7 @@ class Classifier():
                     self.l_out.train()
                 else:
                     self.l_out.eval()
-                num_batches = itr.N // itr.bs
+                num_batches = int(math.ceil(itr.N / itr.bs))
                 all_ys, all_pdist = [], [] # accumulate labels, pdists
                 for b in tqdm(range(num_batches)):
                     X_batch, y_batch = itr.next()
@@ -170,30 +157,41 @@ class Classifier():
                         y_batch = y_batch.cuda()
                     X_batch, y_batch = Variable(X_batch), Variable(y_batch)
                     # clear gradients
-                    if mode == 'train':
-                        self.optim.zero_grad()
+                    self.optim.zero_grad()
                     # compute output of network
-                    out = F.log_softmax(self.l_out(X_batch))
-                    pdist = torch.exp(out)
-                    if self.loss == 'x-ent':
-                        loss = self.loss(out, y_batch)
-                    else:
+                    # TODO: refactor: --out--, pdist, loss = compute(...)
+                    if self.loss_name == 'x-ent':
+                        out = F.log_softmax(self.l_out(X_batch))
+                        pdist = torch.exp(out)
+                        loss = F.nll_loss(out, y_batch)
+                    elif self.loss_name == 'emd2':
+                        out = F.log_softmax(self.l_out(X_batch))
+                        pdist = torch.exp(out)
                         # TODO: clean this up. maybe move the loss
                         # computation to another method
                         # create a one-hot y_batch as well
-                        y_batch_onehot = np.zeros((len(y_batch), self.num_classes), dtype="float32")
+                        y_batch_onehot = np.zeros((len(y_batch), self.num_classes), dtype=y_batch_orig.dtype)
                         y_batch_onehot[ np.arange(0, len(y_batch)), y_batch_orig ] = 1.
                         y_batch_onehot = torch.from_numpy(y_batch_onehot).float()
                         if self.gpu_mode:
                             y_batch_onehot = y_batch_onehot.cuda()
                         y_batch_onehot = Variable(y_batch_onehot)
-                        #import pdb
-                        #pdb.set_trace()
                         cmf_pdist = self.l_pmf(pdist)
                         cmf_y = self.l_pmf(y_batch_onehot)
                         # compute the squared L2 norm
                         loss = torch.mean(torch.sum((cmf_pdist-cmf_y)**2,dim=1))
+                    else:
+                        y_batch_cum = torch.from_numpy(util.int_to_ord(y_batch_orig, self.num_classes)).float()
+                        if self.gpu_mode:
+                            y_batch_cum = y_batch_cum.cuda()
+                        y_batch_cum = Variable(y_batch_cum)
+                        out = self.l_out(X_batch)
+                        #import pdb
+                        #pdb.set_trace()
+                        loss = nn.BCEWithLogitsLoss()(out, y_batch_cum)
+                        pdist = self.l_ctd(torch.exp(out))
                     tmp_stats['%s_loss' % mode].append(loss.data[0])
+                    # after this part, it does the mem error here...
                     if mode == 'train':
                         loss.backward()
                         self.optim.step()
@@ -204,7 +202,21 @@ class Classifier():
                         all_pdist = np.vstack((all_pdist, pdist.cpu().data.numpy()))
                 for key in self.metrics:
                     stats["%s_%s" % (mode, key)] = self.metrics[key](all_pdist, all_ys, self.num_classes)
+                if self.loss_name == 'bce':
+                    ########################################################################
+                    # TODO: find a nicer way to do this, since we've hardcoded
+                    # the biases key name, and also performed the square. Maybe
+                    # we can expose the state dict in the metrics??
+                    # if we're using ordered logit, then also compute expectation bin score
+                    ########################################################################
+                    biases = self.l_out.state_dict()['classifier.biases'].cpu().numpy()**2
+                    c_biases = [ sum(biases[0,0:k+1]) for k in range(len(biases[0])) ]
+                    c_biases = [0.] + c_biases
+                    all_pdist_bin = np.eye(self.num_classes)[ self.bin_expectation(c_biases, all_pdist) ]
+                    for key in self.metrics:
+                        stats['%s_%s_bin' % (mode, key)] = self.metrics[key](all_pdist_bin, all_ys, self.num_classes)
                 stats['%s_loss' % mode] = np.mean(tmp_stats['%s_loss' % mode])
+                stats['lr'] = self.optim.state_dict()['param_groups'][0]['lr']
                 stats['time'] = time.time() - epoch_start_time
                 # save validation preds to disk
                 if mode == "valid" and (epoch+1) % save_every == 0:
@@ -215,7 +227,7 @@ class Classifier():
             if f != None:
                 f.write(str_ + "\n")
                 f.flush()
-            if self.gpu_mode and epoch == 1:
+            if self.gpu_mode and (epoch+1) == 1:
                 # when we're in the first epoch, print how much memory
                 # was used (allocated?) by the GPU
                 try:
@@ -227,16 +239,31 @@ class Classifier():
                 except Exception as e:
                     print "Was unable to detect amount of GPU memory used"
                     print e
-            #self.visualize_results("%s/%i.png" % (result_dir, epoch+1), sample_num=sample_num)
-            #self.visualize_results("%s/f_%i.png" % (result_dir, epoch+1), sample_num=sample_num, fix=True)
             if (epoch+1) % save_every == 0 and model_dir != None:
                 self.save( filename="%s/%i.pkl" % (model_dir, epoch+1) )
         if f != None:
             f.close()
-        #utils.generate_animation(self.result_dir + '/',
-        #                         epoch)
-        #utils.loss_plot(train_hist,
-        #                os.path.join(self.model_dir), self.model_name)
+    def dump_preds(self, itr, filename):
+        """
+        Dump predictions to a CSV file, in the format:
+        p1,p2,...,y, where y = ground truth.
+        """
+        num_batches = int(math.ceil(itr.N / itr.bs))
+        all_ys, all_pdist = [], [] # accumulate labels, pdists
+        for b in range(num_batches):
+            X_batch, y_batch = itr.next()
+            X_batch = torch.from_numpy(X_batch).float()
+            if self.gpu_mode:
+                X_batch = X_batch.cuda()
+            X_batch = Variable(X_batch)
+            pdist = F.softmax(self.l_out(X_batch))
+            all_ys = np.hstack((all_ys, y_batch))
+            if all_pdist == []:
+                all_pdist = pdist.cpu().data.numpy()
+            else:
+                all_pdist = np.vstack((all_pdist, pdist.cpu().data.numpy()))
+        preds_matrix = np.hstack((all_pdist, all_ys[np.newaxis].T))
+        np.savetxt(filename, preds_matrix, delimiter=",", fmt='%.8f') # 8 dp        
     def save(self, filename):
         torch.save(self.l_out.state_dict(), filename)
     def load(self, filename, cpu=False):
@@ -245,61 +272,24 @@ class Classifier():
         else:
             map_location = None
         self.l_out.load_state_dict(torch.load(filename, map_location=map_location))
+    def bin_expectation(self, bins, ps):
+        """
+        This is a bit of a generalisation of the expectation trick
+          (aka softmax ordinal expected value) seen in multiple
+          papers, including my own. Normally, in an ordinal problem,
+          we can compute the expectation by calculating the dot
+          product between [0, ..., K-1] and p(y|x), but in this case
+          we replace [0, ..., K-1] with [0, a1, ..., a_{k-1}], where
+          the sequence is sorted and 0 <= a1 <= ... <= a_{k-1}.
+        bins: Sorted bins [0, a1, a2, ..., ak] of length K (number
+          of classes)
+        ps: probability distributions
+        """
+        idxs = []
+        for i in range(len(ps)):
+            fake_pred = np.dot(ps[i], bins)
+            # basically, figure out which bin the prediction is in
+            pred_idx = np.sum( fake_pred >= bins ) - 1
+            idxs.append(pred_idx)
+        return np.asarray(idxs)
 
-if __name__ == '__main__':
-
-    def test(mode):
-        assert mode in ['train', 'test']
-        from architectures import resnet
-        from metrics import acc, acc_exp, mae, mae_exp, lwk
-        from hooks import get_dump_images
-        cls = Classifier(
-            net_fn=resnet.resnet18,
-            net_fn_params={},
-            in_shp=256, num_classes=101,
-            metrics=OrderedDict({'acc':acc, 'acc_exp': acc_exp, 'mae':mae, 'mae_exp': mae_exp, 'lwk':lwk}),
-            hooks={'dump_images': get_dump_images(5, "tmp")},
-            gpu_mode=True)
-        print cls
-        name = "test"
-        itr_train, itr_valid = get_wiki_iterators(196)
-        if mode == "train":
-            #cls.load("models/%s/10.pkl.bak2" % name)
-            cls.train(itr_train=itr_train,
-                      itr_valid=itr_valid,
-                      epochs=100,
-                      model_dir="models/%s" % name,
-                      result_dir="results/%s" % name,
-                      save_every=10, resume=True)
-        elif mode == "test":
-            cls.load("models/%s/20.pkl.bak3" % name)
-            import pdb
-            pdb.set_trace()
-
-    def test_emd2(mode):
-        assert mode in ['train', 'test']
-        from architectures import resnet
-        from metrics import acc, acc_exp, mae, mae_exp, lwk
-        from hooks import get_dump_images
-        cls = Classifier(
-            net_fn=resnet.resnet18,
-            net_fn_params={},
-            in_shp=256, num_classes=101,
-            loss_name='emd2',
-            metrics=OrderedDict({'acc':acc, 'acc_exp': acc_exp, 'mae':mae, 'mae_exp': mae_exp, 'lwk':lwk}),
-            hooks={'dump_images': get_dump_images(5, "tmp")},
-            gpu_mode=True)
-        print cls
-        name = "test_emd2.s2"
-        itr_train, itr_valid = get_wiki_iterators(196)
-        if mode == "train":
-            cls.train(itr_train=itr_train,
-                      itr_valid=itr_valid,
-                      epochs=100,
-                      model_dir="models/%s" % name,
-                      result_dir="results/%s" % name,
-                      save_every=5, resume=True)
-
-
-            
-    locals()[sys.argv[1]]( sys.argv[2] )

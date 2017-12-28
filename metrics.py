@@ -1,6 +1,5 @@
 import numpy as np
 
-
 def _exp(ps, num_classes):
     """Compute softmax ordinal expected value given a probability distn
     and the number of classes"""
@@ -33,3 +32,21 @@ def lwk(ps, ys, num_classes):
     from sklearn.metrics import cohen_kappa_score
     ys_pred = np.argmax(ps,axis=1)
     return cohen_kappa_score(ys_pred, ys, weights='linear', labels=np.arange(0,num_classes))
+
+if __name__ == '__main__':
+    K = 101
+    biases = np.random.normal(0,1,size=(1,K-1))**2
+    c_biases = [ sum(biases[0,0:k+1]) for k in range(len(biases[0])) ]
+    c_biases = [0.] + c_biases
+
+    fake_pdist = np.random.normal(0,1,size=(101,))**2
+    fake_pdist /= np.sum(fake_pdist)
+
+    fake_pred = np.dot(fake_pdist, c_biases)
+    # basically, figure out which bin the prediction is in
+    pred_idx = np.sum( fake_pred  >= np.asarray(c_biases)  ) - 1
+    
+    import pdb
+    pdb.set_trace()
+    
+    pass
