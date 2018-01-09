@@ -33,6 +33,11 @@ def lwk(ps, ys, num_classes):
     ys_pred = np.argmax(ps,axis=1)
     return cohen_kappa_score(ys_pred, ys, weights='linear', labels=np.arange(0,num_classes))
 
+def qwk(ps, ys, num_classes):
+    from sklearn.metrics import cohen_kappa_score
+    ys_pred = np.argmax(ps,axis=1)
+    return cohen_kappa_score(ys_pred, ys, weights='quadratic', labels=np.arange(0,num_classes))
+
 if __name__ == '__main__':
     K = 101
     biases = np.random.normal(0,1,size=(1,K-1))**2

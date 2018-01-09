@@ -1,8 +1,9 @@
 from torchvision.models import resnet
 from torchvision.models.resnet import ResNet, BasicBlock
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
-
 
 class ResNetCore(nn.Module):
     """
@@ -78,6 +79,10 @@ class ResNetCore(nn.Module):
 
         return x
 
+######################################
+# ALWAYS RETURN LOG PROBABILITIES!!! #
+######################################
+    
 class ResNet18(nn.Module):
     def __init__(self, in_shp, num_classes):
         # in_shp is ignored
@@ -87,7 +92,7 @@ class ResNet18(nn.Module):
     def forward(self, x):
         x = self.features(x)
         x = self.classifier(x)
-        return x
+        return F.log_softmax(x)
 
 from extensions import BinomialExtension
 
@@ -108,7 +113,7 @@ class BinomialResNet18(nn.Module):
     def forward(self, x):
         x = self.features(x)
         x = self.classifier(x)
-        return x
+        return torch.log(x)
 
 from extensions import POM
     
@@ -135,7 +140,26 @@ class PomResNet18(nn.Module):
     def forward(self, x):
         x = self.features(x)
         x = self.classifier(x)
-        return x
+        return torch.log(x)
+
+from extensions import StickBreakingOrdinal
+    
+class StickBreakingResNet18(nn.Module):
+    """
+    """
+    def __init__(self, in_shp, num_classes):
+        """
+        extra_fc: add an extra intermediate layer before the binomial extension,
+          with `num_classes` units?
+        """
+        super(StickBreakingResNet18, self).__init__()
+        features = ResNetCore(block=BasicBlock, layers=[2,2,2,2])
+        self.features = features
+        self.classifier = StickBreakingOrdinal(512, num_classes)
+    def forward(self, x):
+        x = self.features(x)
+        x = self.classifier(x)
+        return torch.log(x)
     
 def resnet18(in_shp, num_classes, **kwargs):
     """This works, but why doesn't the above work???"""
@@ -147,7 +171,7 @@ if __name__ == '__main__':
     import torch
     from torch.autograd import Variable
     import numpy as np
-    net = PomResNet18(256, 5, extra_fc=False)
+    net = StickBreakingResNet18(256, 5)
     x_fake = np.random.normal(0,1,size=(1,3,256,256))
     x_fake = Variable(torch.from_numpy(x_fake).float())
     out = net(x_fake)

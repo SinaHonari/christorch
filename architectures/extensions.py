@@ -169,9 +169,8 @@ class POM(nn.Module):
       result in numerical imprecision since you are subtracting two
       quantities which are very close to each other.
     """
-    def __init__(self, num_units, num_classes, nonlinearity='linear', sd_bias=0.5):
+    def __init__(self, num_units, num_classes):
         super(POM, self).__init__()
-        assert nonlinearity in ['linear', 'min_relu']
         num_classes = num_classes-1
         self.l_fx = nn.Linear(num_units, 1, bias=False)
         self.l_copy = nn.Linear(1, num_classes, bias=False)
@@ -180,7 +179,8 @@ class POM(nn.Module):
         self.l_copy.weight.requires_grad = False
         # parameters / constants
         self.biases = nn.Parameter(
-            torch.from_numpy( np.random.normal(0,sd_bias,size=(1,num_classes)) ).float()
+            #torch.from_numpy( np.random.normal(0,sd_bias,size=(1,num_classes)) ).float()
+            torch.from_numpy( np.linspace(-1,-1,num_classes)[np.newaxis] ).float()
         )
         # upper right ones matrix, for making the
         # biases monotonic
@@ -188,21 +188,62 @@ class POM(nn.Module):
         for k in range(num_classes):
             uro[k,0:(k+1)] = 1.
         self.uro = Variable(torch.from_numpy(uro.T).float())
-        if nonlinearity == 'squared':
-            self.nonlinearity = lambda x: x
-        else:
-            self.nonlinearity = lambda x: x.clamp(max=0)
         self.forward_ran = False
     def forward(self, x):
-        x = self.nonlinearity( self.l_fx(x) )
+        x = self.l_fx(x)
         x = self.l_copy(x)
         if x.is_cuda and not self.forward_ran:
             self.uro = self.uro.cuda()
             self.forward_ran = True 
         m_biases = torch.mm( self.biases**2, self.uro)
-        x = F.logsigmoid(x+m_biases)
+        x = F.sigmoid(x+m_biases)
         return x
 
+class StickBreakingOrdinal(nn.Module):
+    """
+    Notes
+    -----
+
+    Personal communication with Alex Piche: the problem is that
+     for small values of K the distribution will not sum to 1.
+     This means that we either artificially increase the number
+     of classes (meaning we truncate p(y|x) at test time), or
+     we add an extra class which is one minus the total length
+     of the stick. We opt for the latter here since it seems
+     cleaner.
+
+    Note: this has an interpretation of sequentially scanning
+      through the classes and assigning probability space,
+      which makes sense in an ordinal context.
+    """
+    def __init__(self, num_units, num_classes):
+        super(StickBreakingOrdinal, self).__init__()
+        k = num_classes
+        self.l_eta = nn.Linear(num_units, k-1, bias=False)
+        # accumulator
+        self.cmat = Variable( torch.from_numpy(np.tri(k-1, k-1).T).float() )
+        # helper mat/bias for
+        # 1 - sum(rest of stick)
+        self.smat = np.eye(k-1, k)
+        self.smat[:,-1] -= 1
+        self.smat = Variable( torch.from_numpy(self.smat).float() )
+        self.sb = np.zeros((1,k))
+        self.sb[0, -1] = 1.
+        self.sb = Variable( torch.from_numpy(self.sb).float() )
+        self.eps = 1e-4
+        self.forward_ran = False
+    def forward(self, x):
+        if x.is_cuda and not self.forward_ran:
+            self.cmat = self.cmat.cuda()
+            self.smat = self.smat.cuda()
+            self.sb = self.sb.cuda()
+            self.forward_ran = True
+        eta = self.l_eta(x)
+        eta_accum = torch.mm( F.softplus(eta), self.cmat)
+        v = torch.exp(eta - eta_accum)
+        v = torch.mm(v, self.smat) + self.sb
+        return v + self.eps
+    
 class CumulativeToDiscrete(nn.Module):
     """
 
@@ -320,7 +361,7 @@ if __name__ == '__main__':
     import numpy as np
     net = nn.Sequential(
         nn.Linear(10,5),
-        POM(5, 5),
+        StickBreakingOrdinal(5, 5),
     )
     
     x_fake = np.random.normal(0,1,size=(2,10))
@@ -328,7 +369,7 @@ if __name__ == '__main__':
     out = net(x_fake)
     #loss = torch.mean(out)
     #loss.backward()
-    ctd = CumulativeToDiscrete(4)
+    #ctd = CumulativeToDiscrete(4)
     
     print net
     import pdb

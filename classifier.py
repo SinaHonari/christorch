@@ -45,6 +45,9 @@ class Classifier():
                  num_classes,
                  loss_name='x-ent',
                  opt=optim.Adam, opt_args={'lr':1e-3, 'betas':(0.9, 0.999)},
+                 scheduler=None,
+                 scheduler_args={},
+                 scheduler_metric='valid_loss',
                  l2_decay=0.,
                  metrics={},
                  hooks={},
@@ -57,6 +60,9 @@ class Classifier():
           `metric_fn` is a function that takes a minibatch of pdists
           (bs, k) and a minibatch of ground truths (k,) and returns
           some sort of metric, expressed as as a scalar.
+        scheduler:
+        scheduler_args:
+        scheduler_metric:
         hooks: a dict of the form {hook_name: hook_fn}, where
           `hook_fn` is a function that takes (X_batch, y_batch, epoch)
           and gets called every minibatch, and performs some function.
@@ -79,6 +85,11 @@ class Classifier():
         params = filter(lambda x: x.requires_grad, self.l_out.parameters())
         #params = self.l_out.parameters()
         self.optim = opt(params, weight_decay=l2_decay, **opt_args)
+        if scheduler != None:
+            self.scheduler = scheduler(self.optim, **scheduler_args)
+        else:
+            self.scheduler = None
+        self.scheduler_metric = scheduler_metric
         self.metrics = metrics
         self.hooks = hooks
         self.gpu_mode = gpu_mode
@@ -125,10 +136,12 @@ class Classifier():
             for key in self.metrics.keys():
                 stats["%s_%s" % ('train', key)] = None
                 stats["%s_%s" % ('valid', key)] = None
+                '''
                 if self.loss_name == 'bce':
                     # add a new way of doing prediction
                     stats["%s_%s_bin" % ('train', key)] = None
                     stats["%s_%s_bin" % ('valid', key)] = None
+                '''
             ####
             stats['epoch'] = epoch+1
             if (epoch+1) == 1:
@@ -161,11 +174,11 @@ class Classifier():
                     # compute output of network
                     # TODO: refactor: --out--, pdist, loss = compute(...)
                     if self.loss_name == 'x-ent':
-                        out = F.log_softmax(self.l_out(X_batch))
+                        out = self.l_out(X_batch)
                         pdist = torch.exp(out)
-                        loss = F.nll_loss(out, y_batch)
+                        loss = nn.NLLLoss()(out, y_batch)
                     elif self.loss_name == 'emd2':
-                        out = F.log_softmax(self.l_out(X_batch))
+                        out = self.l_out(X_batch)
                         pdist = torch.exp(out)
                         # TODO: clean this up. maybe move the loss
                         # computation to another method
@@ -186,8 +199,6 @@ class Classifier():
                             y_batch_cum = y_batch_cum.cuda()
                         y_batch_cum = Variable(y_batch_cum)
                         out = self.l_out(X_batch)
-                        #import pdb
-                        #pdb.set_trace()
                         loss = nn.BCEWithLogitsLoss()(out, y_batch_cum)
                         pdist = self.l_ctd(torch.exp(out))
                     tmp_stats['%s_loss' % mode].append(loss.data[0])
@@ -202,6 +213,7 @@ class Classifier():
                         all_pdist = np.vstack((all_pdist, pdist.cpu().data.numpy()))
                 for key in self.metrics:
                     stats["%s_%s" % (mode, key)] = self.metrics[key](all_pdist, all_ys, self.num_classes)
+                '''
                 if self.loss_name == 'bce':
                     ########################################################################
                     # TODO: find a nicer way to do this, since we've hardcoded
@@ -215,13 +227,17 @@ class Classifier():
                     all_pdist_bin = np.eye(self.num_classes)[ self.bin_expectation(c_biases, all_pdist) ]
                     for key in self.metrics:
                         stats['%s_%s_bin' % (mode, key)] = self.metrics[key](all_pdist_bin, all_ys, self.num_classes)
+                '''
                 stats['%s_loss' % mode] = np.mean(tmp_stats['%s_loss' % mode])
-                stats['lr'] = self.optim.state_dict()['param_groups'][0]['lr']
-                stats['time'] = time.time() - epoch_start_time
                 # save validation preds to disk
                 if mode == "valid" and (epoch+1) % save_every == 0:
                     preds_matrix = np.hstack((all_pdist, all_ys[np.newaxis].T))
                     np.savetxt("%s/%s_preds_%i.csv" % (result_dir, mode, epoch+1), preds_matrix, delimiter=",")
+            stats['lr'] = self.optim.state_dict()['param_groups'][0]['lr']
+            stats['time'] = time.time() - epoch_start_time
+            # update the learning rate scheduler, if applicable
+            if self.scheduler != None:
+                self.scheduler.step(stats[self.scheduler_metric])
             str_ = ",".join([ str(stats[key]) for key in stats ])
             print str_
             if f != None:
