@@ -89,11 +89,27 @@ class ResNet(nn.Module):
         super(ResNet, self).__init__()
         self.features = get_resnet(kind)
         self.classifier = nn.Linear(512 * self.features.block.expansion, num_classes)
+        self.keys = ['p1']
     def forward(self, x):
         x = self.features(x)
         x = self.classifier(x)
-        return F.log_softmax(x)
+        return {'p1': F.log_softmax(x)}
 
+class ResNetTwoOutput(nn.Module):
+    def __init__(self, in_shp, num_classes, kind='18'):
+        # in_shp is ignored
+        super(ResNetTwoOutput, self).__init__()
+        self.features = get_resnet(kind)
+        self.cls1 = nn.Linear(512 * self.features.block.expansion, num_classes)
+        self.cls2 = nn.Linear(512 * self.features.block.expansion, num_classes)        
+        self.keys = ['p1', 'p2']
+    def forward(self, x):
+        x = self.features(x)
+        out1 = self.cls1(x)
+        out2 = self.cls2(x)
+        return {'p1': F.log_softmax(out1), 'p2': F.log_softmax(out2)}
+
+    
 from extensions import BinomialExtension
 
 def get_resnet(kind):
@@ -123,7 +139,7 @@ class BinomialResNet(nn.Module):
     def forward(self, x):
         x = self.features(x)
         x = self.classifier(x)
-        return torch.log(x)
+        return {'p1': torch.log(x)}
 
 from extensions import POM
     
@@ -147,10 +163,11 @@ class PomResNet(nn.Module):
         else:
             self.features = features
             self.classifier = POM(512, num_classes, nonlinearity=nonlinearity)
+        self.keys = ['p1']
     def forward(self, x):
         x = self.features(x)
         x = self.classifier(x)
-        return torch.log(x)
+        return {'p1': torch.log(x)}
 
 from extensions import StickBreakingOrdinal
     
@@ -166,16 +183,16 @@ class StickBreakingResNet(nn.Module):
         features = get_resnet(kind)
         self.features = features
         self.classifier = StickBreakingOrdinal(512, num_classes)
+        self.keys = ['p1']
     def forward(self, x):
         x = self.features(x)
         x = self.classifier(x)
-        return torch.log(x)
+        return {'p1': torch.log(x)}
     
 def resnet18(in_shp, num_classes, **kwargs):
     """This works, but why doesn't the above work???"""
     model = resnet.resnet18(pretrained=False, num_classes=num_classes)
     return model
-
 
 if __name__ == '__main__':
     import torch

@@ -91,6 +91,26 @@ def swap_axes(img):
     img2 = img2.swapaxes(3,2).swapaxes(2,1)
     return img2
 
+class DebugIterator():
+    def __init__(self, img_size, num_classes, bs, n_outs=1, N=100):
+        self.img_size = img_size
+        self.num_classes = num_classes
+        self.n_outs = n_outs
+        self.N = N
+        self.bs = bs
+        self.fn = self._fn()
+    def _fn(self):
+        while True:
+            x_fake = np.random.normal(0, 1, size=(self.bs, 3, self.img_size, self.img_size))
+            ys = []
+            for i in range(self.n_outs):
+                ys.append( np.random.randint(0, self.num_classes, size=(self.bs,)) )
+            yield [x_fake] + ys
+    def __iter__(self):
+        return self
+    def next(self):
+        return self.fn.next()
+
 class ClassifierIterator():
     """
     H5 friendly iterator.

@@ -75,6 +75,8 @@ class Classifier():
         self.loss_name = loss_name
         self.verbose = verbose
         self.l_out = net_fn(in_shp, num_classes, **net_fn_params)
+        # l_out is the instantiated class
+        # l_out.forward(x) returns a dict of outputs...
         # https://github.com/pytorch/pytorch/issues/1266
         params = filter(lambda x: x.requires_grad, self.l_out.parameters())
         self.optim = opt(params, weight_decay=l2_decay, **opt_args)
@@ -93,15 +95,16 @@ class Classifier():
                 self.l_ctd.cuda()
         if self.gpu_mode:
             self.l_out.cuda()
-    def compute_loss(self, X_batch, y_batch):
+    def compute_loss(self, out, y_batch):
         """
         """
+        y_batch_orig = y_batch
         if self.loss_name == 'x-ent':
-            out = self.l_out(X_batch)
+            #out = out_fn(X_batch)
             pdist = torch.exp(out)
             loss = nn.NLLLoss()(out, y_batch)
         elif self.loss_name == 'emd2':
-            out = self.l_out(X_batch)
+            #out = out_fn(X_batch)
             pdist = torch.exp(out)
             # TODO: clean this up. maybe move the loss
             # computation to another method
@@ -121,7 +124,7 @@ class Classifier():
             if self.gpu_mode:
                 y_batch_cum = y_batch_cum.cuda()
             y_batch_cum = Variable(y_batch_cum)
-            out = self.l_out(X_batch)
+            #out = out_fn(X_batch)
             loss = nn.BCEWithLogitsLoss()(out, y_batch_cum)
             pdist = self.l_ctd(torch.exp(out))   
         return loss, pdist
@@ -168,9 +171,10 @@ class Classifier():
             stats = OrderedDict({})
             for key in stats_keys:
                 stats[key] = None
-            for key in self.metrics.keys():
-                stats["%s_%s" % ('train', key)] = None
-                stats["%s_%s" % ('valid', key)] = None
+            for metric_key in self.metrics.keys():
+                for y_key in self.l_out.keys:
+                    stats["%s_%s_%s" % ('train', metric_key, y_key)] = None
+                    stats["%s_%s_%s" % ('valid', metric_key, y_key)] = None
             stats['epoch'] = epoch+1
             if (epoch+1) == 1:
                 # if this is the start of training, print out / save the header
@@ -186,36 +190,57 @@ class Classifier():
                 else:
                     self.l_out.eval()
                 num_batches = int(math.ceil(itr.N / itr.bs))
-                all_ys, all_pdist = [], [] # accumulate labels, pdists
+                buf = {}
+                for key in self.l_out.keys:
+                    buf[key] = {'ys':[], 'pdist':[]}
+                # the iterator is assumed to return data in the form
+                # (X_batch, y_batch_1, y_batch_2, ...)
                 for b in tqdm(range(num_batches)):
-                    X_batch, y_batch = itr.next()
-                    y_batch_orig = y_batch
-                    for key in self.hooks.keys():
-                        self.hooks[key](X_batch, y_batch, epoch+1)
-                    X_batch, y_batch = torch.from_numpy(X_batch).float(), torch.from_numpy(y_batch).long()
+                    self.optim.zero_grad()
+                    packet = itr.next()
+                    if len(packet)-1 != len(self.l_out.keys):
+                        raise Exception("The number of ys returned by the iterator must match "
+                                        + "the number of outputs (keys) of the network!!!")
+                    X_batch = packet[0]
+                    X_batch = torch.from_numpy(X_batch).float()
                     if self.gpu_mode:
                         X_batch = X_batch.cuda()
-                        y_batch = y_batch.cuda()
-                    X_batch, y_batch = Variable(X_batch), Variable(y_batch)
-                    self.optim.zero_grad()
-                    loss, pdist = self.compute_loss(X_batch, y_batch)
-                    tmp_stats['%s_loss' % mode].append(loss.data[0])
+                    X_batch = Variable(X_batch)
+                    outs = self.l_out(X_batch)
+                    packet = packet[1::] # TODO
+                    tot_loss = 0.
+                    for y_key in outs.keys():
+                        y_batch = packet[0]
+                        packet = packet[1::] # TODO
+                        for key in self.hooks.keys():
+                            self.hooks[key](X_batch, y_batch, epoch+1)
+                        y_batch = torch.from_numpy(y_batch).long()
+                        if self.gpu_mode:
+                            y_batch = y_batch.cuda()
+                        y_batch = Variable(y_batch)
+                        outs = self.l_out(X_batch)
+                        this_loss, this_pdist = self.compute_loss(outs[y_key], y_batch)
+                        tot_loss += this_loss
+                        buf[y_key]['ys'] = np.hstack((buf[y_key]['ys'], y_batch.cpu().data.numpy()))
+                        if buf[y_key]['pdist'] == []:
+                            buf[y_key]['pdist'] = this_pdist.cpu().data.numpy()
+                        else:
+                            buf[y_key]['pdist'] = np.vstack((buf[y_key]['pdist'], this_pdist.cpu().data.numpy()))
                     if mode == 'train':
-                        loss.backward()
+                        tot_loss.backward()
                         self.optim.step()
-                    all_ys = np.hstack((all_ys, y_batch.cpu().data.numpy()))
-                    if all_pdist == []:
-                        all_pdist = pdist.cpu().data.numpy()
-                    else:
-                        all_pdist = np.vstack((all_pdist, pdist.cpu().data.numpy()))
+                    #########
+                    tmp_stats['%s_loss' % mode].append(tot_loss.data[0])
                 for key in self.metrics:
-                    stats["%s_%s" % (mode, key)] = self.metrics[key](all_pdist, all_ys, self.num_classes)
+                    stats["%s_%s_%s" % (mode, key, y_key)] = self.metrics[key](buf[y_key]['pdist'], buf[y_key]['ys'], self.num_classes)
+                #########
                 stats['%s_loss' % mode] = np.mean(tmp_stats['%s_loss' % mode])
-                if mode == "valid" and (epoch+1) % save_every == 0:
-                    preds_matrix = np.hstack((all_pdist, all_ys[np.newaxis].T))
-                    np.savetxt("%s/%s_preds_%i.csv" % (result_dir, mode, epoch+1), preds_matrix, delimiter=",")
+                #if mode == "valid" and (epoch+1) % save_every == 0:
+                #    preds_matrix = np.hstack((all_pdist, all_ys[np.newaxis].T))
+                #    np.savetxt("%s/%s_preds_%i.csv" % (result_dir, mode, epoch+1), preds_matrix, delimiter=",")
             stats['lr'] = self.optim.state_dict()['param_groups'][0]['lr']
             stats['time'] = time.time() - epoch_start_time
+            print stats
             # update the learning rate scheduler, if applicable
             if scheduler != None:
                 scheduler.step(stats[scheduler_metric])
@@ -269,24 +294,30 @@ class Classifier():
         else:
             map_location = None
         self.l_out.load_state_dict(torch.load(filename, map_location=map_location))
-    def bin_expectation(self, bins, ps):
-        """
-        This is a bit of a generalisation of the expectation trick
-          (aka softmax ordinal expected value) seen in multiple
-          papers, including my own. Normally, in an ordinal problem,
-          we can compute the expectation by calculating the dot
-          product between [0, ..., K-1] and p(y|x), but in this case
-          we replace [0, ..., K-1] with [0, a1, ..., a_{k-1}], where
-          the sequence is sorted and 0 <= a1 <= ... <= a_{k-1}.
-        bins: Sorted bins [0, a1, a2, ..., ak] of length K (number
-          of classes)
-        ps: probability distributions
-        """
-        idxs = []
-        for i in range(len(ps)):
-            fake_pred = np.dot(ps[i], bins)
-            # basically, figure out which bin the prediction is in
-            pred_idx = np.sum( fake_pred >= bins ) - 1
-            idxs.append(pred_idx)
-        return np.asarray(idxs)
 
+if __name__ == '__main__':
+    import util
+    itr_train = util.DebugIterator(img_size=256, num_classes=10, bs=4, n_outs=2, N=10)
+    itr_valid = util.DebugIterator(img_size=256, num_classes=10, bs=4, n_outs=2, N=10)
+    from architectures import resnet
+    from metrics import *
+    r = '18'
+    cls = Classifier(
+        net_fn=resnet.ResNetTwoOutput,
+        net_fn_params={},
+        in_shp=256, num_classes=10,
+        metrics=OrderedDict({'acc':acc, 'acc_exp': acc_exp, 'mae':mae, 'mae_exp': mae_exp, 'qwk':qwk}),
+        opt_args={'lr':1e-3},
+        gpu_mode='detect',
+    )
+    print cls
+    name = "test"
+    mode = "train"
+    if mode == "train":
+        cls.train(itr_train=itr_train,
+                  itr_valid=itr_valid,
+                  epochs=100,
+                  model_dir="models/%s" % name,
+                  result_dir="results/%s" % name,
+                  save_every=10)
+    
