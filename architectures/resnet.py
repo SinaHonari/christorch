@@ -1,5 +1,5 @@
 from torchvision.models import resnet
-from torchvision.models.resnet import ResNet, BasicBlock
+from torchvision.models.resnet import ResNet, BasicBlock, Bottleneck
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -83,11 +83,11 @@ class ResNetCore(nn.Module):
 # ALWAYS RETURN LOG PROBABILITIES!!! #
 ######################################
     
-class ResNet18(nn.Module):
-    def __init__(self, in_shp, num_classes):
+class ResNet(nn.Module):
+    def __init__(self, in_shp, num_classes, kind='18'):
         # in_shp is ignored
-        super(ResNet18, self).__init__()
-        self.features = ResNetCore(block=BasicBlock, layers=[2,2,2,2])
+        super(ResNet, self).__init__()
+        self.features = get_resnet(kind)
         self.classifier = nn.Linear(512 * self.features.block.expansion, num_classes)
     def forward(self, x):
         x = self.features(x)
@@ -96,14 +96,24 @@ class ResNet18(nn.Module):
 
 from extensions import BinomialExtension
 
-class BinomialResNet18(nn.Module):
-    def __init__(self, in_shp, num_classes, learn_tau='none', extra_fc=False):
+def get_resnet(kind):
+    assert kind in ['18', '34', '50', '101', '152']
+    layer_spec = {
+        '18': (BasicBlock, [2,2,2,2]),
+        '34': (BasicBlock, [3,4,6,3]),
+        '50': (Bottleneck, [3,4,6,3]),
+        '101': (Bottleneck, [3,4,23,3])
+    }
+    return ResNetCore(block=layer_spec[kind][0], layers=layer_spec[kind][1])
+
+class BinomialResNet(nn.Module):
+    def __init__(self, in_shp, num_classes, kind='18', learn_tau='none', extra_fc=False):
         """
         extra_fc: add an extra intermediate layer before the binomial extension,
           with `num_classes` units?
         """
-        super(BinomialResNet18, self).__init__()
-        features = ResNetCore(block=BasicBlock, layers=[2,2,2,2])
+        super(BinomialResNet, self).__init__()
+        features = get_resnet(kind)
         if extra_fc:
             self.features = nn.Sequential(features, nn.Linear(512, num_classes), nn.ReLU())
             self.classifier = BinomialExtension(num_classes, num_classes, learn_tau=learn_tau)
@@ -117,18 +127,18 @@ class BinomialResNet18(nn.Module):
 
 from extensions import POM
     
-class PomResNet18(nn.Module):
+class PomResNet(nn.Module):
     """
     Proportional odds model applied to the end of a ResNet18 feature
       extractor.
     """
-    def __init__(self, in_shp, num_classes, nonlinearity='linear', extra_fc=False):
+    def __init__(self, in_shp, num_classes, kind='18', nonlinearity='linear', extra_fc=False):
         """
         extra_fc: add an extra intermediate layer before the binomial extension,
           with `num_classes` units?
         """
-        super(PomResNet18, self).__init__()
-        features = ResNetCore(block=BasicBlock, layers=[2,2,2,2])
+        super(PomResNet, self).__init__()
+        features = get_resnet(kind)
         # cumulative has k-1 units, but when the class converts them to
         # discrete probs we get the k units back
         if extra_fc:
@@ -144,16 +154,16 @@ class PomResNet18(nn.Module):
 
 from extensions import StickBreakingOrdinal
     
-class StickBreakingResNet18(nn.Module):
+class StickBreakingResNet(nn.Module):
     """
     """
-    def __init__(self, in_shp, num_classes):
+    def __init__(self, in_shp, num_classes, kind='18'):
         """
         extra_fc: add an extra intermediate layer before the binomial extension,
           with `num_classes` units?
         """
-        super(StickBreakingResNet18, self).__init__()
-        features = ResNetCore(block=BasicBlock, layers=[2,2,2,2])
+        super(StickBreakingResNet, self).__init__()
+        features = get_resnet(kind)
         self.features = features
         self.classifier = StickBreakingOrdinal(512, num_classes)
     def forward(self, x):

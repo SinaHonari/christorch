@@ -45,9 +45,6 @@ class Classifier():
                  num_classes,
                  loss_name='x-ent',
                  opt=optim.Adam, opt_args={'lr':1e-3, 'betas':(0.9, 0.999)},
-                 scheduler=None,
-                 scheduler_args={},
-                 scheduler_metric='valid_loss',
                  l2_decay=0.,
                  metrics={},
                  hooks={},
@@ -60,9 +57,6 @@ class Classifier():
           `metric_fn` is a function that takes a minibatch of pdists
           (bs, k) and a minibatch of ground truths (k,) and returns
           some sort of metric, expressed as as a scalar.
-        scheduler:
-        scheduler_args:
-        scheduler_metric:
         hooks: a dict of the form {hook_name: hook_fn}, where
           `hook_fn` is a function that takes (X_batch, y_batch, epoch)
           and gets called every minibatch, and performs some function.
@@ -83,13 +77,7 @@ class Classifier():
         self.l_out = net_fn(in_shp, num_classes, **net_fn_params)
         # https://github.com/pytorch/pytorch/issues/1266
         params = filter(lambda x: x.requires_grad, self.l_out.parameters())
-        #params = self.l_out.parameters()
         self.optim = opt(params, weight_decay=l2_decay, **opt_args)
-        if scheduler != None:
-            self.scheduler = scheduler(self.optim, **scheduler_args)
-        else:
-            self.scheduler = None
-        self.scheduler_metric = scheduler_metric
         self.metrics = metrics
         self.hooks = hooks
         self.gpu_mode = gpu_mode
@@ -105,12 +93,56 @@ class Classifier():
                 self.l_ctd.cuda()
         if self.gpu_mode:
             self.l_out.cuda()
-
-    def train(self, itr_train, itr_valid, epochs, model_dir, result_dir, resume=False, max_iters=None, save_every=1, verbose=True):
+    def compute_loss(self, X_batch, y_batch):
+        """
+        """
+        if self.loss_name == 'x-ent':
+            out = self.l_out(X_batch)
+            pdist = torch.exp(out)
+            loss = nn.NLLLoss()(out, y_batch)
+        elif self.loss_name == 'emd2':
+            out = self.l_out(X_batch)
+            pdist = torch.exp(out)
+            # TODO: clean this up. maybe move the loss
+            # computation to another method
+            # create a one-hot y_batch as well
+            y_batch_onehot = np.zeros((len(y_batch), self.num_classes), dtype=y_batch_orig.dtype)
+            y_batch_onehot[ np.arange(0, len(y_batch)), y_batch_orig ] = 1.
+            y_batch_onehot = torch.from_numpy(y_batch_onehot).float()
+            if self.gpu_mode:
+                y_batch_onehot = y_batch_onehot.cuda()
+            y_batch_onehot = Variable(y_batch_onehot)
+            cmf_pdist = self.l_pmf(pdist)
+            cmf_y = self.l_pmf(y_batch_onehot)
+            # compute the squared L2 norm
+            loss = torch.mean(torch.sum((cmf_pdist-cmf_y)**2,dim=1))
+        elif self.loss_name == 'bce':
+            y_batch_cum = torch.from_numpy(util.int_to_ord(y_batch_orig, self.num_classes)).float()
+            if self.gpu_mode:
+                y_batch_cum = y_batch_cum.cuda()
+            y_batch_cum = Variable(y_batch_cum)
+            out = self.l_out(X_batch)
+            loss = nn.BCEWithLogitsLoss()(out, y_batch_cum)
+            pdist = self.l_ctd(torch.exp(out))   
+        return loss, pdist
+    def train(self,
+              itr_train, itr_valid,
+              epochs, model_dir, result_dir,
+              resume=False,
+              max_iters=None,
+              save_every=1,
+              scheduler=None,
+              scheduler_args={},
+              scheduler_metric='valid_loss',
+              verbose=True):
         """
         If a results directory is specified, this will:
         - Save a CSV file (results.txt) with per-epoch statistics for training/validation.
         - Save a CSV file (valid_preds.txt) with predicted prob. dists on the validation set.
+
+        ----------
+        Parameters
+        ----------
         itr_train: iterator for training. It is assumed this loops infinitely, and has the two fields `N`
           (total number of instances) and `bs` (batch size).
         itr_valid: same as above, but for validatioh.
@@ -125,24 +157,20 @@ class Classifier():
         for folder_name in [model_dir, result_dir]:
             if folder_name is not None and not os.path.exists(folder_name):
                 os.makedirs(folder_name)
+        if scheduler != None:
+            scheduler = scheduler(self.optim, **scheduler_args)
+        else:
+            scheduler = None
         f = open("%s/results.txt" % result_dir, "wb" if not resume else "a") if result_dir != None else None
         start_time = time.time()
         stats_keys = ['epoch', 'train_loss', 'valid_loss', 'lr', 'time']
         for epoch in range(epochs):
-            ####
             stats = OrderedDict({})
             for key in stats_keys:
                 stats[key] = None
             for key in self.metrics.keys():
                 stats["%s_%s" % ('train', key)] = None
                 stats["%s_%s" % ('valid', key)] = None
-                '''
-                if self.loss_name == 'bce':
-                    # add a new way of doing prediction
-                    stats["%s_%s_bin" % ('train', key)] = None
-                    stats["%s_%s_bin" % ('valid', key)] = None
-                '''
-            ####
             stats['epoch'] = epoch+1
             if (epoch+1) == 1:
                 # if this is the start of training, print out / save the header
@@ -169,40 +197,9 @@ class Classifier():
                         X_batch = X_batch.cuda()
                         y_batch = y_batch.cuda()
                     X_batch, y_batch = Variable(X_batch), Variable(y_batch)
-                    # clear gradients
                     self.optim.zero_grad()
-                    # compute output of network
-                    # TODO: refactor: --out--, pdist, loss = compute(...)
-                    if self.loss_name == 'x-ent':
-                        out = self.l_out(X_batch)
-                        pdist = torch.exp(out)
-                        loss = nn.NLLLoss()(out, y_batch)
-                    elif self.loss_name == 'emd2':
-                        out = self.l_out(X_batch)
-                        pdist = torch.exp(out)
-                        # TODO: clean this up. maybe move the loss
-                        # computation to another method
-                        # create a one-hot y_batch as well
-                        y_batch_onehot = np.zeros((len(y_batch), self.num_classes), dtype=y_batch_orig.dtype)
-                        y_batch_onehot[ np.arange(0, len(y_batch)), y_batch_orig ] = 1.
-                        y_batch_onehot = torch.from_numpy(y_batch_onehot).float()
-                        if self.gpu_mode:
-                            y_batch_onehot = y_batch_onehot.cuda()
-                        y_batch_onehot = Variable(y_batch_onehot)
-                        cmf_pdist = self.l_pmf(pdist)
-                        cmf_y = self.l_pmf(y_batch_onehot)
-                        # compute the squared L2 norm
-                        loss = torch.mean(torch.sum((cmf_pdist-cmf_y)**2,dim=1))
-                    else:
-                        y_batch_cum = torch.from_numpy(util.int_to_ord(y_batch_orig, self.num_classes)).float()
-                        if self.gpu_mode:
-                            y_batch_cum = y_batch_cum.cuda()
-                        y_batch_cum = Variable(y_batch_cum)
-                        out = self.l_out(X_batch)
-                        loss = nn.BCEWithLogitsLoss()(out, y_batch_cum)
-                        pdist = self.l_ctd(torch.exp(out))
+                    loss, pdist = self.compute_loss(X_batch, y_batch)
                     tmp_stats['%s_loss' % mode].append(loss.data[0])
-                    # after this part, it does the mem error here...
                     if mode == 'train':
                         loss.backward()
                         self.optim.step()
@@ -213,31 +210,15 @@ class Classifier():
                         all_pdist = np.vstack((all_pdist, pdist.cpu().data.numpy()))
                 for key in self.metrics:
                     stats["%s_%s" % (mode, key)] = self.metrics[key](all_pdist, all_ys, self.num_classes)
-                '''
-                if self.loss_name == 'bce':
-                    ########################################################################
-                    # TODO: find a nicer way to do this, since we've hardcoded
-                    # the biases key name, and also performed the square. Maybe
-                    # we can expose the state dict in the metrics??
-                    # if we're using ordered logit, then also compute expectation bin score
-                    ########################################################################
-                    biases = self.l_out.state_dict()['classifier.biases'].cpu().numpy()**2
-                    c_biases = [ sum(biases[0,0:k+1]) for k in range(len(biases[0])) ]
-                    c_biases = [0.] + c_biases
-                    all_pdist_bin = np.eye(self.num_classes)[ self.bin_expectation(c_biases, all_pdist) ]
-                    for key in self.metrics:
-                        stats['%s_%s_bin' % (mode, key)] = self.metrics[key](all_pdist_bin, all_ys, self.num_classes)
-                '''
                 stats['%s_loss' % mode] = np.mean(tmp_stats['%s_loss' % mode])
-                # save validation preds to disk
                 if mode == "valid" and (epoch+1) % save_every == 0:
                     preds_matrix = np.hstack((all_pdist, all_ys[np.newaxis].T))
                     np.savetxt("%s/%s_preds_%i.csv" % (result_dir, mode, epoch+1), preds_matrix, delimiter=",")
             stats['lr'] = self.optim.state_dict()['param_groups'][0]['lr']
             stats['time'] = time.time() - epoch_start_time
             # update the learning rate scheduler, if applicable
-            if self.scheduler != None:
-                self.scheduler.step(stats[self.scheduler_metric])
+            if scheduler != None:
+                scheduler.step(stats[scheduler_metric])
             str_ = ",".join([ str(stats[key]) for key in stats ])
             print str_
             if f != None:
