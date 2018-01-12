@@ -91,6 +91,33 @@ def swap_axes(img):
     img2 = img2.swapaxes(3,2).swapaxes(2,1)
     return img2
 
+class BasicIterator():
+    def __init__(self, X, y, bs, shuffle=True):
+        assert len(X) == len(y)
+        self.X = X
+        self.y = y
+        self.N = X.shape[0]
+        self.bs = bs
+        self.shuffle = shuffle
+        self.fn = self._fn()
+    def _fn(self):
+        while True:
+            idxs = np.arange(0, self.N)
+            if self.shuffle:
+                np.random.shuffle(idxs)
+                self.X = self.X[idxs]
+                self.y = self.y[idxs]
+            n_batches = int(np.ceil(self.N / self.bs))
+            for b in range(n_batches):
+                xb, yb = self.X[b*self.bs:(b+1)*self.bs], self.y[b*self.bs:(b+1)*self.bs]
+                if xb.shape[0] == 0:
+                    continue
+                yield xb, yb
+    def __iter__(self):
+        return self
+    def next(self):
+        return self.fn.next()
+
 class DebugIterator():
     def __init__(self, img_size, num_classes, bs, n_outs=1, N=100):
         self.img_size = img_size
@@ -111,7 +138,7 @@ class DebugIterator():
     def next(self):
         return self.fn.next()
 
-class ClassifierIterator():
+class Hdf5ClassifierIterator():
     """
     H5 friendly iterator.
     Constructs slices [0..bs], [bs, bs*2], [bs*2, bs*3], ... and shuffles

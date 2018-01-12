@@ -97,6 +97,9 @@ class Classifier():
             self.l_out.cuda()
     def compute_loss(self, out, y_batch):
         """
+        TODO: cross-entropy has a `weights` parameter which can be used
+        to ignore certain labels. This means if our y_batch consists of
+        ?? labels we can ignore them in the loss calculation...!
         """
         y_batch_orig = y_batch
         if self.loss_name == 'x-ent':
