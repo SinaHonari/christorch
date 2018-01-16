@@ -33,3 +33,16 @@ class MnistNet(nn.Module):
         x = self.features(x)
         x = F.log_softmax(self.classifier(x))
         return {'p': x}
+
+class MnistNetTwoOutput(nn.Module):
+    def __init__(self, in_shp, num_classes):
+        super(MnistNetTwoOutput, self).__init__()
+        self.features = MnistFeatureExtractor()
+        self.classifier = nn.Linear(50, num_classes)
+        self.classifier2 = nn.Linear(50, num_classes)
+        self.keys = ['p1', 'p2']
+    def forward(self, x):
+        x = self.features(x)
+        p1 = F.log_softmax(self.classifier(x))
+        p2 = F.log_softmax(self.classifier2(x))        
+        return {'p1': p1, 'p2': p2}

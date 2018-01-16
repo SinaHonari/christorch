@@ -194,7 +194,7 @@ class Classifier():
                     X_batch = Variable(X_batch)
                     outs = self.l_out(X_batch)
                     tot_loss = 0.
-                    for y_idx in range(len(outs.keys())):
+                    for y_idx, y_key in enumerate(self.l_out.keys):
                         y_batch = y_packet[:,y_idx]
                         for key in self.hooks.keys():
                             self.hooks[key](X_batch, y_batch, epoch+1)
@@ -216,8 +216,9 @@ class Classifier():
                     #########
                     tmp_stats['%s_loss' % mode].append(tot_loss.data[0])
                 pbar.close()
-                for key in self.metrics:
-                    stats["%s_%s_%s" % (mode, key, y_key)] = self.metrics[key](buf[y_key]['pdist'], buf[y_key]['ys'], self.num_classes)
+                for y_key in buf.keys():
+                    for key in self.metrics:
+                        stats["%s_%s_%s" % (mode, key, y_key)] = self.metrics[key](buf[y_key]['pdist'], buf[y_key]['ys'], self.num_classes)
                 #########
                 stats['%s_loss' % mode] = np.mean(tmp_stats['%s_loss' % mode])
                 #if mode == "valid" and (epoch+1) % save_every == 0:

@@ -38,5 +38,27 @@ if __name__ == '__main__':
                 result_dir=None
             )
 
+    def test_mnist_twoout(mode):
+        from data import load_mnist
+        X_train, y_train, X_valid, y_valid, _ , _ = load_mnist.load_dataset()
+        it_train = DataLoader(util.NumpyDataset(X=X_train, ys=[y_train, np.copy(y_train)]), batch_size=32, shuffle=True)
+        it_valid = DataLoader(util.NumpyDataset(X=X_valid, ys=[y_valid, np.copy(y_valid)]), batch_size=32, shuffle=False)
+        cls = Classifier(
+            net_fn=basic.MnistNetTwoOutput,
+            net_fn_params={},
+            in_shp=256, num_classes=10,
+            metrics=OrderedDict({'acc':acc}),
+            opt_args={'lr':1e-3},
+            gpu_mode='detect',
+        )
+        if mode == 'train':
+            cls.train(
+                itr_train=it_train,
+                itr_valid=it_valid,
+                epochs=100,
+                model_dir=None,
+                result_dir=None
+            )
+            
     locals()[ sys.argv[1] ]( sys.argv[2] )
     #test_mnist('train')
