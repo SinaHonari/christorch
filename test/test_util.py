@@ -60,8 +60,9 @@ class TestH5Dataset(TestCase):
         from torch.utils.data import DataLoader
         from keras.preprocessing.image import ImageDataGenerator
         h5 = h5py.File("/data/lisa/data/beckhamc/hdf5/dr.h5", "r")
-        dd = util.H5Dataset(X=h5['xt'], y=h5['yt'], keras_imgen=ImageDataGenerator())
-        loader = DataLoader(dd, batch_size=8, shuffle=True, num_workers=0)
+        dd = util.NumpyDataset(X=h5['xt'], y=h5['yt'], keras_imgen=ImageDataGenerator())
+        loader = DataLoader(dd, batch_size=32, shuffle=True, num_workers=0)
         for x,y in loader:
+            assert len(x.size()) == 4
             print x,y
             break

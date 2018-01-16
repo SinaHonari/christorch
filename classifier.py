@@ -13,25 +13,6 @@ import math
 from tqdm import tqdm
 import h5py
 import util
-
-class FakeIterator():
-    def __init__(self, inp_shape, num_classes):
-        self.inp_shape = inp_shape
-        self.num_classes = num_classes
-        self.fn = self._iterate()
-        self.N = 100
-        self.bs = inp_shape[0]
-    def _iterate(self):
-        while True:
-            X_batch = np.random.normal(0, 1, size=self.inp_shape).astype("float32")
-            y_batch = np.random.randint(0, self.num_classes, size=(self.inp_shape[0],)).astype("int32")
-            yield X_batch, y_batch
-    def __iter__(self):
-        return self
-    def next(self):
-        return self.fn.next()
-
-from memory_profiler import profile
     
 class Classifier():
     def num_parameters(self):
@@ -44,10 +25,9 @@ class Classifier():
                  in_shp,
                  num_classes,
                  loss_name='x-ent',
-                 opt=optim.Adam, opt_args={'lr':1e-3, 'betas':(0.9, 0.999)},
+                 opt=optim.Adam, opt_args={},
                  l2_decay=0.,
-                 metrics={},
-                 hooks={},
+                 metrics={}, hooks={},
                  gpu_mode='detect',
                  verbose=True):
         """
@@ -192,36 +172,40 @@ class Classifier():
                     self.l_out.train()
                 else:
                     self.l_out.eval()
-                num_batches = int(math.ceil(itr.N / itr.bs))
                 buf = {}
                 for key in self.l_out.keys:
                     buf[key] = {'ys':[], 'pdist':[]}
                 # the iterator is assumed to return data in the form
                 # (X_batch, y_batch_1, y_batch_2, ...)
-                for b in tqdm(range(num_batches)):
+                pbar = tqdm(total=len(itr))
+                for b, (X_batch,y_packet) in enumerate(itr):
+                    pbar.update(1)
                     self.optim.zero_grad()
-                    packet = itr.next()
-                    if len(packet)-1 != len(self.l_out.keys):
+                    # if len(y_packet) == 1, we know it's simply one label set,
+                    # but if it is a matrix (where each line corresponds to a set of labels),
+                    # it should match the key signature
+                    if len(y_packet.size()) == 2 and y_packet.size()[0] != len(self.l_out.keys):
                         raise Exception("The number of ys returned by the iterator must match "
                                         + "the number of outputs (keys) of the network!!!")
-                    X_batch = packet[0]
-                    X_batch = torch.from_numpy(X_batch).float()
+                    #X_batch = torch.from_numpy(X_batch).float()
+                    X_batch = X_batch.float()
                     if self.gpu_mode:
                         X_batch = X_batch.cuda()
                     X_batch = Variable(X_batch)
                     outs = self.l_out(X_batch)
-                    packet = packet[1::] # TODO
                     tot_loss = 0.
-                    for y_key in outs.keys():
-                        y_batch = packet[0]
-                        packet = packet[1::] # TODO
+                    for y_idx in range(len(outs.keys())):
+                        if len(y_packet.size()) == 2:
+                            y_batch = y_packet[y_idx, :]
+                        else:
+                            y_batch = y_packet
                         for key in self.hooks.keys():
                             self.hooks[key](X_batch, y_batch, epoch+1)
-                        y_batch = torch.from_numpy(y_batch).long()
+                        #y_batch = torch.from_numpy(y_batch).long()
+                        y_batch = y_batch.long()
                         if self.gpu_mode:
                             y_batch = y_batch.cuda()
                         y_batch = Variable(y_batch)
-                        outs = self.l_out(X_batch)
                         this_loss, this_pdist = self.compute_loss(outs[y_key], y_batch)
                         tot_loss += this_loss
                         buf[y_key]['ys'] = np.hstack((buf[y_key]['ys'], y_batch.cpu().data.numpy()))
@@ -234,6 +218,7 @@ class Classifier():
                         self.optim.step()
                     #########
                     tmp_stats['%s_loss' % mode].append(tot_loss.data[0])
+                pbar.close()
                 for key in self.metrics:
                     stats["%s_%s_%s" % (mode, key, y_key)] = self.metrics[key](buf[y_key]['pdist'], buf[y_key]['ys'], self.num_classes)
                 #########
@@ -243,7 +228,6 @@ class Classifier():
                 #    np.savetxt("%s/%s_preds_%i.csv" % (result_dir, mode, epoch+1), preds_matrix, delimiter=",")
             stats['lr'] = self.optim.state_dict()['param_groups'][0]['lr']
             stats['time'] = time.time() - epoch_start_time
-            print stats
             # update the learning rate scheduler, if applicable
             if scheduler != None:
                 scheduler.step(stats[scheduler_metric])

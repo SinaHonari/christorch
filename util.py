@@ -258,7 +258,7 @@ def test_image_folder(batch_size):
 
 import torch.utils.data.dataset as dataset
 
-class H5Dataset(dataset.Dataset):
+class NumpyDataset(dataset.Dataset):
     def __init__(self, X, y, keras_imgen=None, rnd_state=np.random.RandomState(0), data_format='channels_last'):
         """
         keras_preprocessor: cannot use torchvision PIL transforms,
@@ -270,14 +270,11 @@ class H5Dataset(dataset.Dataset):
         self.N = len(X)
         self.keras_imgen = keras_imgen
         self.rnd_state = rnd_state
-        #self.idxs = np.arange(0, self.N)
-        #np.random.shuffle(self.idxs)
     def __getitem__(self, index):
-        #return self.X[ self.idxs[index] ], self.y[ self.idxs[index] ]
         xx, yy = self.X[index], self.y[index]
         if self.keras_imgen != None:
             seed = self.rnd_state.randint(0, 100000)
-            xx = self.keras_imgen.flow(xx[np.newaxis], None, batch_size=1, seed=seed, shuffle=False).next()
+            xx = self.keras_imgen.flow(xx[np.newaxis], None, batch_size=1, seed=seed, shuffle=False).next()[0]
         return xx, yy
     def __len__(self):
         return self.N
@@ -291,15 +288,6 @@ if __name__ == '__main__':
         import pdb
         pdb.set_trace()
     '''
-    import h5py
-    from keras.preprocessing.image import ImageDataGenerator
-    h5 = h5py.File("/data/lisa/data/beckhamc/hdf5/dr.h5", "r")
-    dd = H5Dataset(X=h5['xt'], y=h5['yt'], keras_imgen=ImageDataGenerator())
-
-    loader = DataLoader(dd, batch_size=8, shuffle=True, num_workers=0)
-    for x,y in loader:
-        print x,y
-        break
 
     
     
