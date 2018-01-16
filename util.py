@@ -92,10 +92,16 @@ def swap_axes(img):
     return img2
 
 class BasicIterator():
-    def __init__(self, X, y, bs, shuffle=True):
-        assert len(X) == len(y)
+    """
+    This iterator supports multiple sources of labels.
+    """
+    def __init__(self, X, ys, bs, shuffle=True):
         self.X = X
-        self.y = y
+        if type(ys) != list:
+            ys = [ys]
+        for y in ys:
+            assert len(y) == len(X)
+        self.ys = ys
         self.N = X.shape[0]
         self.bs = bs
         self.shuffle = shuffle
@@ -106,13 +112,15 @@ class BasicIterator():
             if self.shuffle:
                 np.random.shuffle(idxs)
                 self.X = self.X[idxs]
-                self.y = self.y[idxs]
+                for i in range(len(self.ys)):
+                    self.ys[i] = self.ys[i][idxs]
             n_batches = int(np.ceil(self.N / self.bs))
             for b in range(n_batches):
-                xb, yb = self.X[b*self.bs:(b+1)*self.bs], self.y[b*self.bs:(b+1)*self.bs]
+                xb = self.X[b*self.bs:(b+1)*self.bs]
                 if xb.shape[0] == 0:
                     continue
-                yield xb, yb
+                ys_batches = [ y[b*self.bs:(b+1)*self.bs] for y in self.ys ]
+                yield [xb] + ys_batches
     def __iter__(self):
         return self
     def next(self):
@@ -219,11 +227,6 @@ class Hdf5ClassifierIterator():
         return aug_x    
 
 
-def test_image_folder(batch_size):
-    loader = ImageFolder("/data/lisa/data/beckhamc/dr-data/train_sample")
-    train_loader = DataLoader(
-        loader, batch_size=batch_size, shuffle=True, num_workers=-1)
-    return train_loader
 
 def int_to_ord(labels, num_classes):
     """
@@ -236,15 +239,67 @@ def int_to_ord(labels, num_classes):
         ords[i][0:labels[i]] *= 0.
     return ords
 
-if __name__ == '__main__':
-    #scale = transforms.Scale(255)
-    #loader = test_image_folder(2)
-    #for data in loader:
-    #    aa,bb = data
+####################################################################
 
-    labels = np.asarray([0,1,2,3,4])
-    tmp = int_to_ord(labels, 5)
+def test_image_folder(batch_size):
+    import torchvision.transforms as transforms
+    # loads images in [0,1] initially
+    loader = ImageFolder(root="/data/lisa/data/beckhamc/dr-data/train_sample",
+                         transform=transforms.Compose([
+                             transforms.Scale(256),
+                             transforms.CenterCrop(256),
+                             transforms.ToTensor(),
+                             transforms.Lambda(lambda img: (img-0.5)/0.5)
+                         ])
+    )
+    train_loader = DataLoader(
+        loader, batch_size=batch_size, shuffle=True, num_workers=1)
+    return train_loader
+
+import torch.utils.data.dataset as dataset
+
+class H5Dataset(dataset.Dataset):
+    def __init__(self, X, y, keras_imgen=None, rnd_state=np.random.RandomState(0), data_format='channels_last'):
+        """
+        keras_preprocessor: cannot use torchvision PIL transforms,
+          so just use Keras' shit here.
+        """
+        self.X = X
+        self.y = y
+        assert len(X) == len(y)
+        self.N = len(X)
+        self.keras_imgen = keras_imgen
+        self.rnd_state = rnd_state
+        #self.idxs = np.arange(0, self.N)
+        #np.random.shuffle(self.idxs)
+    def __getitem__(self, index):
+        #return self.X[ self.idxs[index] ], self.y[ self.idxs[index] ]
+        xx, yy = self.X[index], self.y[index]
+        if self.keras_imgen != None:
+            seed = self.rnd_state.randint(0, 100000)
+            xx = self.keras_imgen.flow(xx[np.newaxis], None, batch_size=1, seed=seed, shuffle=False).next()
+        return xx, yy
+    def __len__(self):
+        return self.N
+
+if __name__ == '__main__':
+    #tmp = H5Dataset()
+    '''
+    loader = test_image_folder(1)
+    for x,y in loader:
+        print x,y
+        import pdb
+        pdb.set_trace()
+    '''
+    import h5py
+    from keras.preprocessing.image import ImageDataGenerator
+    h5 = h5py.File("/data/lisa/data/beckhamc/hdf5/dr.h5", "r")
+    dd = H5Dataset(X=h5['xt'], y=h5['yt'], keras_imgen=ImageDataGenerator())
+
+    loader = DataLoader(dd, batch_size=8, shuffle=True, num_workers=0)
+    for x,y in loader:
+        print x,y
+        break
+
     
     
-    import pdb
-    pdb.set_trace()
