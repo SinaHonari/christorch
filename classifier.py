@@ -184,7 +184,7 @@ class Classifier():
                     # if len(y_packet) == 1, we know it's simply one label set,
                     # but if it is a matrix (where each line corresponds to a set of labels),
                     # it should match the key signature
-                    if len(y_packet.size()) == 2 and y_packet.size()[0] != len(self.l_out.keys):
+                    if y_packet.size()[1] != len(self.l_out.keys):
                         raise Exception("The number of ys returned by the iterator must match "
                                         + "the number of outputs (keys) of the network!!!")
                     #X_batch = torch.from_numpy(X_batch).float()
@@ -195,10 +195,7 @@ class Classifier():
                     outs = self.l_out(X_batch)
                     tot_loss = 0.
                     for y_idx in range(len(outs.keys())):
-                        if len(y_packet.size()) == 2:
-                            y_batch = y_packet[y_idx, :]
-                        else:
-                            y_batch = y_packet
+                        y_batch = y_packet[:,y_idx]
                         for key in self.hooks.keys():
                             self.hooks[key](X_batch, y_batch, epoch+1)
                         #y_batch = torch.from_numpy(y_batch).long()

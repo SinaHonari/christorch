@@ -19,8 +19,8 @@ if __name__ == '__main__':
     def test_mnist(mode):
         from data import load_mnist
         X_train, y_train, X_valid, y_valid, _ , _ = load_mnist.load_dataset()
-        it_train = DataLoader(util.NumpyDataset(X=X_train, y=y_train), batch_size=32, shuffle=True)
-        it_valid = DataLoader(util.NumpyDataset(X=X_valid, y=y_valid), batch_size=32, shuffle=False)
+        it_train = DataLoader(util.NumpyDataset(X=X_train, ys=y_train), batch_size=32, shuffle=True)
+        it_valid = DataLoader(util.NumpyDataset(X=X_valid, ys=y_valid), batch_size=32, shuffle=False)
         cls = Classifier(
             net_fn=basic.MnistNet,
             net_fn_params={},

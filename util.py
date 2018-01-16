@@ -259,22 +259,38 @@ def test_image_folder(batch_size):
 import torch.utils.data.dataset as dataset
 
 class NumpyDataset(dataset.Dataset):
-    def __init__(self, X, y, keras_imgen=None, rnd_state=np.random.RandomState(0), data_format='channels_last'):
+    def __init__(self, X, ys, keras_imgen=None, rnd_state=np.random.RandomState(0), reorder_channels=False):
         """
         keras_preprocessor: cannot use torchvision PIL transforms,
           so just use Keras' shit here.
+        reorder_channels: in the event that X is in the form (bs, h, w, f), if this flag is set to
+          True, we will reshape the x batches so that they are in the form (bs, f, h, w). Note that
+          if this is required, you should make sure that the Keras data augmentor knows to use
+          channels_last (TF-style tensors) rather than channels_first.
         """
         self.X = X
-        self.y = y
+        if type(ys) != list:
+            ys = [ys]
+        for y in ys:
+            assert len(y) == len(X)
+        self.ys = ys
         assert len(X) == len(y)
         self.N = len(X)
         self.keras_imgen = keras_imgen
         self.rnd_state = rnd_state
+        self.reorder_channels = reorder_channels
     def __getitem__(self, index):
-        xx, yy = self.X[index], self.y[index]
+        #xx, yy = self.X[index], self.y[index]
+        xx = self.X[index]
+        yy = []
+        for y in self.ys:
+            yy.append(y[index])
+        yy = np.asarray(yy)
         if self.keras_imgen != None:
             seed = self.rnd_state.randint(0, 100000)
             xx = self.keras_imgen.flow(xx[np.newaxis], None, batch_size=1, seed=seed, shuffle=False).next()[0]
+        if self.reorder_channels:
+            xx = xx.swapaxes(3,2).swapaxes(2,1)
         return xx, yy
     def __len__(self):
         return self.N
