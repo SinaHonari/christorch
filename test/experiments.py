@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 if __name__ == '__main__':
 
     def test_mnist(mode):
+        assert mode in ['train', 'test']
         from data import load_mnist
         X_train, y_train, X_valid, y_valid, _ , _ = load_mnist.load_dataset()
         it_train = DataLoader(util.NumpyDataset(X=X_train, ys=y_train), batch_size=32, shuffle=True)
@@ -37,8 +38,12 @@ if __name__ == '__main__':
                 model_dir=None,
                 result_dir=None
             )
+        elif mode == 'test':
+            cls.dump_preds(it_train, prefix="preds/pdist")
+            
 
     def test_mnist_twoout(mode):
+        assert mode in ['train', 'test']
         from data import load_mnist
         X_train, y_train, X_valid, y_valid, _ , _ = load_mnist.load_dataset()
         it_train = DataLoader(util.NumpyDataset(X=X_train, ys=[y_train, np.copy(y_train)]), batch_size=32, shuffle=True)
@@ -59,6 +64,8 @@ if __name__ == '__main__':
                 model_dir=None,
                 result_dir=None
             )
+        elif mode == 'test':
+            cls.dump_preds(it_train, prefix="preds/pdist")
             
     locals()[ sys.argv[1] ]( sys.argv[2] )
     #test_mnist('train')

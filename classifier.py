@@ -250,27 +250,47 @@ class Classifier():
                 self.save( filename="%s/%i.pkl" % (model_dir, epoch+1) )
         if f != None:
             f.close()
-    def dump_preds(self, itr, filename):
+    def dump_preds(self, itr, prefix):
         """
+        Dump predictions to CSV file on disk for every output layer
+          of the network.
+        prefix: filename prefix s.t. if we have output keys in the form
+          [y1,y2,...] we get CSV files in the format [prefix_y1.csv,
+          prefix_y2.csv, ...]
         Dump predictions to a CSV file, in the format:
         p1,p2,...,y, where y = ground truth.
         """
-        num_batches = int(math.ceil(itr.N / itr.bs))
-        all_ys, all_pdist = [], [] # accumulate labels, pdists
-        for b in range(num_batches):
-            X_batch, y_batch = itr.next()
-            X_batch = torch.from_numpy(X_batch).float()
+        dirname = os.path.dirname(prefix)
+        if not os.path.exists(dirname):
+            os.mkdir(dirname)
+        buf = {}
+        for key in self.l_out.keys:
+            buf[key] = {'ys':[], 'pdist':[]}
+        pbar = tqdm(total=len(itr))
+        for b, (X_batch,y_packet) in enumerate(itr):
+            pbar.update(1)
+            X_batch = X_batch.float()
             if self.gpu_mode:
                 X_batch = X_batch.cuda()
             X_batch = Variable(X_batch)
-            pdist = F.softmax(self.l_out(X_batch))
-            all_ys = np.hstack((all_ys, y_batch))
-            if all_pdist == []:
-                all_pdist = pdist.cpu().data.numpy()
-            else:
-                all_pdist = np.vstack((all_pdist, pdist.cpu().data.numpy()))
-        preds_matrix = np.hstack((all_pdist, all_ys[np.newaxis].T))
-        np.savetxt(filename, preds_matrix, delimiter=",", fmt='%.8f') # 8 dp        
+            outs = self.l_out(X_batch) # log probabilities
+            if y_packet.size()[1] != len(self.l_out.keys):
+                raise Exception("The number of ys returned by the iterator must match "
+                                + "the number of outputs (keys) of the network!!!")
+            for y_idx, y_key in enumerate(self.l_out.keys):
+                pdist_batch = F.softmax(outs[y_key])
+                y_batch = y_packet[:,y_idx].numpy()
+                if buf[y_key]['pdist'] == []:
+                    buf[y_key]['pdist'] = pdist_batch.cpu().data.numpy()
+                else:
+                    buf[y_key]['pdist'] = np.vstack((buf[y_key]['pdist'], pdist_batch.cpu().data.numpy()))
+                buf[y_key]['ys'] = np.hstack((buf[y_key]['ys'], y_batch))
+        pbar.close()
+        for key in self.l_out.keys:
+            preds_matrix = np.hstack((buf[key]['pdist'], buf[key]['ys'][np.newaxis].T))
+            fname = "%s_%s.csv" % (prefix, key)
+            print "Saving prediction file: %s" % fname
+            np.savetxt(fname, preds_matrix, delimiter=",", fmt='%.8f') # 8 dp        
     def save(self, filename):
         torch.save(self.l_out.state_dict(), filename)
     def load(self, filename, cpu=False):
@@ -279,30 +299,3 @@ class Classifier():
         else:
             map_location = None
         self.l_out.load_state_dict(torch.load(filename, map_location=map_location))
-
-if __name__ == '__main__':
-    import util
-    itr_train = util.DebugIterator(img_size=256, num_classes=10, bs=4, n_outs=2, N=10)
-    itr_valid = util.DebugIterator(img_size=256, num_classes=10, bs=4, n_outs=2, N=10)
-    from architectures import resnet
-    from metrics import *
-    r = '18'
-    cls = Classifier(
-        net_fn=resnet.ResNetTwoOutput,
-        net_fn_params={},
-        in_shp=256, num_classes=10,
-        metrics=OrderedDict({'acc':acc, 'acc_exp': acc_exp, 'mae':mae, 'mae_exp': mae_exp, 'qwk':qwk}),
-        opt_args={'lr':1e-3},
-        gpu_mode='detect',
-    )
-    print cls
-    name = "test"
-    mode = "train"
-    if mode == "train":
-        cls.train(itr_train=itr_train,
-                  itr_valid=itr_valid,
-                  epochs=100,
-                  model_dir="models/%s" % name,
-                  result_dir="results/%s" % name,
-                  save_every=10)
-    
