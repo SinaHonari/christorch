@@ -1,9 +1,9 @@
 import torch
+import os
 import numpy as np
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
-from torch.utils.data import DataLoader
-
+from torch.utils.data import DataLoader, Dataset
 
 """
 Code borrowed from Pedro Costa's vess2ret repo:
@@ -91,142 +91,6 @@ def swap_axes(img):
     img2 = img2.swapaxes(3,2).swapaxes(2,1)
     return img2
 
-class BasicIterator():
-    """
-    This iterator supports multiple sources of labels.
-    """
-    def __init__(self, X, ys, bs, shuffle=True):
-        self.X = X
-        if type(ys) != list:
-            ys = [ys]
-        for y in ys:
-            assert len(y) == len(X)
-        self.ys = ys
-        self.N = X.shape[0]
-        self.bs = bs
-        self.shuffle = shuffle
-        self.fn = self._fn()
-    def _fn(self):
-        while True:
-            idxs = np.arange(0, self.N)
-            if self.shuffle:
-                np.random.shuffle(idxs)
-                self.X = self.X[idxs]
-                for i in range(len(self.ys)):
-                    self.ys[i] = self.ys[i][idxs]
-            n_batches = int(np.ceil(self.N / self.bs))
-            for b in range(n_batches):
-                xb = self.X[b*self.bs:(b+1)*self.bs]
-                if xb.shape[0] == 0:
-                    continue
-                ys_batches = [ y[b*self.bs:(b+1)*self.bs] for y in self.ys ]
-                yield [xb] + ys_batches
-    def __iter__(self):
-        return self
-    def next(self):
-        return self.fn.next()
-
-class DebugIterator():
-    def __init__(self, img_size, num_classes, bs, n_outs=1, N=100):
-        self.img_size = img_size
-        self.num_classes = num_classes
-        self.n_outs = n_outs
-        self.N = N
-        self.bs = bs
-        self.fn = self._fn()
-    def _fn(self):
-        while True:
-            x_fake = np.random.normal(0, 1, size=(self.bs, 3, self.img_size, self.img_size))
-            ys = []
-            for i in range(self.n_outs):
-                ys.append( np.random.randint(0, self.num_classes, size=(self.bs,)) )
-            yield [x_fake] + ys
-    def __iter__(self):
-        return self
-    def next(self):
-        return self.fn.next()
-
-class Hdf5ClassifierIterator():
-    """
-    H5 friendly iterator.
-    Constructs slices [0..bs], [bs, bs*2], [bs*2, bs*3], ... and shuffles
-    these at each epoch. That way the elements of the minibatch are still
-    ordered w.r.t. to the entire h5 file.
-    Features:
-    - Allows one to convert the dataset into a binary classification
-    - Deal with channels_last or channels_first inputs
-    - Use in conjunction with Keras image data generator
-    - Allows random crops
-    """
-    def __init__(self, X_arr, y_arr, bs, rnd_state=None, imgen=None, crop=None, mode='old', binary_idxs=None, data_format='channels_first'):
-        """
-        X_arr: a 4D h5 tensor
-        y_arr: a 1d h5 list
-        bs: batch size
-        rnd_state:
-        imgen: a Keras image data generator
-        crop: height/width (in px) of random crops
-        mode: TODO
-        binary_idxs: only consider two classes (if there are > 2) and convert these to binary (0,1).
-        """
-        assert mode in ['old', 'new']
-        assert data_format in ['channels_first', 'channels_last']
-        self.data_format = data_format
-        self.X_arr, self.y_arr, self.bs, self.rnd_state, self.imgen, self.crop, self.mode = \
-            X_arr, y_arr, bs, rnd_state, imgen, crop, mode
-        if binary_idxs == None:
-            self.slices = _get_slices(X_arr.shape[0], bs)
-            self.selected_idxs = None
-            self.N = X_arr.shape[0]
-        else:
-            assert len(binary_idxs) == 2
-            self.selected_idxs = np.where( np.in1d(y_arr[:], binary_idxs) )[0].tolist()
-            self.slices = _get_slices( len(self.selected_idxs), bs)
-            self.binary_idxs = binary_idxs
-            self.N = len(self.selected_idxs)
-        self.fn = self._fn()
-    def _fn(self):
-        while True:
-            if self.rnd_state != None:
-                self.rnd_state.shuffle(self.slices)
-            for elem in self.slices:
-                if self.selected_idxs == None:
-                    this_X, this_y = self.X_arr[elem], self.y_arr[elem]
-                else:
-                    this_X, this_y = self.X_arr[ self.selected_idxs[elem] ], self.y_arr[ self.selected_idxs[elem] ]
-                    this_y[ this_y == self.binary_idxs[0] ] = 0
-                    this_y[ this_y == self.binary_idxs[1] ] = 1
-                if self.mode == 'old':
-                    # why does this work and the new version doesn't??
-                    images_for_this_X = [ self._augment_image(img, self.imgen, self.crop) for img in this_X ]
-                    images_for_this_X = np.asarray(images_for_this_X, dtype="float32")
-                else:
-                    # TODO: why does this refactored version not work????
-                    # if i use this version and run my experiment, the qwk never goes >0.001...
-                    assert self.crop == None
-                    seed = self.rnd_state.randint(0, 100000)
-                    # this imgen flow thing???
-                    images_for_this_X = self.imgen.flow(this_X, None, batch_size=self.bs, seed=seed, shuffle=False).next()
-                if self.data_format == 'channels_first':
-                    yield images_for_this_X, this_y
-                else:
-                    yield images_for_this_X.swapaxes(3,2).swapaxes(2,1), this_y
-    def __iter__(self):
-        return self
-    def next(self):
-        return self.fn.next()
-    def _augment_image(self, img, imgen=None, crop=None):
-        img_size = img.shape[-1]
-        aug_x = img
-        if imgen != None:
-            aug_x = imgen.flow( np.asarray([aug_x], dtype=img.dtype), None).next()[0]
-        if crop != None:
-            x_start = np.random.randint(0, img_size-crop+1)
-            y_start = np.random.randint(0, img_size-crop+1)
-            aug_x = aug_x[:, y_start:y_start+crop, x_start:x_start+crop]
-        return aug_x    
-
-
 
 def int_to_ord(labels, num_classes):
     """
@@ -294,6 +158,42 @@ class NumpyDataset(dataset.Dataset):
         return xx, yy
     def __len__(self):
         return self.N
+
+from PIL import Image
+    
+class DatasetFromFolder(Dataset):
+    """
+    Courtesy of:
+    https://github.com/togheppi/CycleGAN/blob/master/dataset.py
+    """
+    def __init__(self, image_dir, subfolder='', transform=None, resize_scale=None, crop_size=None, fliplr=False):
+        super(DatasetFromFolder, self).__init__()
+        self.input_path = os.path.join(image_dir, subfolder)
+        self.image_filenames = [x for x in sorted(os.listdir(self.input_path))]
+        self.transform = transform
+        self.resize_scale = resize_scale
+        self.crop_size = crop_size
+        self.fliplr = fliplr
+    def __getitem__(self, index):
+        # Load Image
+        img_fn = os.path.join(self.input_path, self.image_filenames[index])
+        img = Image.open(img_fn).convert('RGB')
+        # preprocessing
+        if self.resize_scale:
+            img = img.resize((self.resize_scale, self.resize_scale), Image.BILINEAR)
+        if self.crop_size:
+            x = np.random.randint(0, self.resize_scale - self.crop_size + 1)
+            y = np.random.randint(0, self.resize_scale - self.crop_size + 1)
+            img = img.crop((x, y, x + self.crop_size, y + self.crop_size))
+        if self.fliplr:
+            if np.random.random() < 0.5:
+                img = img.transpose(Image.FLIP_LEFT_RIGHT)
+        if self.transform is not None:
+            img = self.transform(img)
+        return img
+
+    def __len__(self):
+        return len(self.image_filenames)
 
 if __name__ == '__main__':
     #tmp = H5Dataset()
