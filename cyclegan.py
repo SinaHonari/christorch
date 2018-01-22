@@ -16,38 +16,8 @@ import h5py
 import util
 import itertools
 
-class ImagePool():
-    """
-    Courtesy of:
-    https://github.com/togheppi/CycleGAN/blob/master/utils.py
-    """
-    def __init__(self, pool_size):
-        self.pool_size = pool_size
-        if self.pool_size > 0:
-            self.num_imgs = 0
-            self.images = []
-
-    def query(self, images):
-        if self.pool_size == 0:
-            return images
-        return_images = []
-        for image in images.data:
-            image = torch.unsqueeze(image, 0)
-            if self.num_imgs < self.pool_size:
-                self.num_imgs = self.num_imgs + 1
-                self.images.append(image)
-                return_images.append(image)
-            else:
-                p = np.random.uniform(0, 1)
-                if p > 0.5:
-                    random_id = np.random.randint(0, self.pool_size-1)
-                    tmp = self.images[random_id].clone()
-                    self.images[random_id] = image
-                    return_images.append(tmp)
-                else:
-                    return_images.append(image)
-        return_images = Variable(torch.cat(return_images, 0))
-        return return_images
+from skimage.io import imsave
+from skimage.transform import rescale
 
 class CycleGAN():
     def num_parameters(self, net):
@@ -83,7 +53,6 @@ class CycleGAN():
         # LOSSES #
         ##########
         self.mse_loss = torch.nn.MSELoss()
-        #self.l1_loss = torch.nn.L1Loss()
         ##############
         # OPTIMISERS #
         ##############
@@ -140,8 +109,8 @@ class CycleGAN():
                       'valid_da_loss', 'valid_db_loss',
                       'lr_g', 'lr_da', 'lr_db', 'time']
         num_pool = 50
-        fake_A_pool = ImagePool(num_pool)
-        fake_B_pool = ImagePool(num_pool)
+        fake_A_pool = util.ImagePool(num_pool)
+        fake_B_pool = util.ImagePool(num_pool)
         for epoch in range(epochs):
             stats = OrderedDict({})
             for key in stats_keys:
@@ -156,7 +125,7 @@ class CycleGAN():
             epoch_start_time = time.time()
             # accumulator to be able to compute averages
             tmp_stats = {
-                key:[] for key in stats_keys if key not in ['epoch', 'time']
+                key:[] for key in stats_keys if key not in ['epoch', 'time', 'lr_g', 'lr_da', 'lr_db']
             }
             for idx, (itr_A, itr_B) in enumerate([ (itr_a_train, itr_b_train), (itr_a_valid, itr_b_valid) ]):
                 mode = 'train' if idx==0 else 'valid'
@@ -170,8 +139,12 @@ class CycleGAN():
                     self.g_btoa.eval()
                     self.d_a.eval()
                     self.d_b.eval()
+                n_iters = min(len(itr_A),len(itr_B))
                 if verbose:
-                    pbar = tqdm( total=min(len(itr_A),len(itr_B)) )
+                    pbar = tqdm(total=n_iters)
+                # we will use rnd_b to find a random img to dump
+                rnd_b = np.random.randint(0, n_iters)
+                #rnd_b = 1
                 for b, (A_real, B_real) in enumerate(zip(itr_A, itr_B)):
                     if max_iters > 0 and b == max_iters:
                         break
@@ -190,17 +163,20 @@ class CycleGAN():
                     d_a_fake = self.d_a(btoa)
                     d_b_fake = self.d_b(atob)
                     # constants
-                    ones, zeros = torch.ones(d_a_fake.size()), torch.zeros(d_a_fake.size())
+                    ones_da, zeros_da = torch.ones(d_a_fake.size()), torch.zeros(d_a_fake.size())
+                    ones_db, zeros_db = torch.ones(d_b_fake.size()), torch.zeros(d_b_fake.size())                    
                     if self.gpu_mode:
-                        ones, zeros = ones.cuda(), zeros.cuda()
-                    ones, zeros = Variable(ones), Variable(zeros)
+                        ones_da, zeros_da, ones_db, zeros_db = \
+                                    ones_da.cuda(), zeros_da.cuda(), ones_db.cuda(), zeros_db.cuda()
+                    ones_da, zeros_da, ones_db, zeros_db = \
+                                    Variable(ones_da), Variable(zeros_da), Variable(ones_db), Variable(zeros_db)
                     ###################
                     # TRAIN GENERATOR #
                     ###################
                     # gen A loss = squared_error(d_a_fake, 1).mean()
-                    btoa_gen_loss = self.mse_loss(d_a_fake, ones)
+                    btoa_gen_loss = self.mse_loss(d_a_fake, ones_da)
                     # gen B loss = squared_error(d_b_fake, 1).mean()
-                    atob_gen_loss = self.mse_loss(d_b_fake, ones)
+                    atob_gen_loss = self.mse_loss(d_b_fake, ones_db)
                     # atob cycle
                     cycle_aba = torch.mean(torch.abs(A_real - atob_btoa))
                     # btoa cycle
@@ -216,12 +192,19 @@ class CycleGAN():
                     #######################
                     d_a_real = self.d_a(A_real)
                     d_b_real = self.d_b(B_real)
-                    d_a_fake = fake_A_pool.query(d_a_fake)
-                    d_b_fake = fake_B_pool.query(d_b_fake)
+                    # ??????
+                    A_fake = fake_A_pool.query(btoa)
+                    B_fake = fake_B_pool.query(atob)
+                    d_a_fake = self.d_a(A_fake)
+                    d_b_fake = self.d_b(B_fake)
                     # disc A loss = squared_error(d_a_real, 1).mean() + squared_error(d_a_fake, 0).mean()
-                    d_a_loss = self.mse_loss(d_a_real, ones) + self.mse_loss(d_a_fake, zeros) 
+                    d_a_loss = (self.mse_loss(d_a_real, ones_da) + self.mse_loss(d_a_fake, zeros_da)) * 0.5
                     # disc B loss = squared_error(d_b_real, 1).mean() + squared_error(d_b_fake, 0).mean()
-                    d_b_loss = self.mse_loss(d_b_real, ones) + self.mse_loss(d_b_fake, zeros)
+                    d_b_loss = (self.mse_loss(d_b_real, ones_db) + self.mse_loss(d_b_fake, zeros_db)) * 0.5
+
+                    #import pdb
+                    #pdb.set_trace()
+                    
                     if mode == 'train':
                         # backprop for D_A
                         self.optim_d_a.zero_grad()
@@ -240,20 +223,32 @@ class CycleGAN():
                     tmp_stats['%s_bab_loss' % mode].append(cycle_bab.data[0])
                     tmp_stats['%s_da_loss' % mode].append(d_a_loss.data[0])
                     tmp_stats['%s_db_loss' % mode].append(d_b_loss.data[0])
+                    #########
+                    if b == rnd_b:
+                        # print out example from val set to disk
+                        outs = [A_real, atob, atob_btoa, B_real, btoa, btoa_atob]
+                        outs_np = [ x.data.cpu().numpy() for x in outs ]
+                        shp = outs_np[0].shape[-1]
+                        bs = outs_np[0].shape[0]
+                        grid = np.zeros((shp*bs, shp*6, 3))
+                        for j in range(bs):
+                            for i in range(6):
+                                grid[j*shp:(j+1)*shp,i*shp:(i+1)*shp,:] = util.convert_to_rgb(outs_np[i][j])
+                        imsave(arr=rescale(grid, scale=0.5), fname="%s/%i_%s.png" % (result_dir, epoch+1, mode))
                 if verbose:
                     pbar.close()
                 #########
                 for key in tmp_stats:
                     stats[key] = np.mean( tmp_stats[key] )
             stats['lr_g'] = self.optim_g.state_dict()['param_groups'][0]['lr']
-            stats['lr_a'] = self.optim_d_a.state_dict()['param_groups'][0]['lr']
-            stats['lr_b'] = self.optim_d_b.state_dict()['param_groups'][0]['lr']            
+            stats['lr_da'] = self.optim_d_a.state_dict()['param_groups'][0]['lr']
+            stats['lr_db'] = self.optim_d_b.state_dict()['param_groups'][0]['lr']            
             stats['time'] = time.time() - epoch_start_time
             # update the learning rate scheduler, if applicable
             #if scheduler != None:
             #    scheduler.step(stats[scheduler_metric])
             str_ = ",".join([ str(stats[key]) for key in stats ])
-            print str_
+            print str_            
             if f != None:
                 f.write(str_ + "\n")
                 f.flush()
@@ -276,13 +271,6 @@ class CycleGAN():
         self.d_a.load_state_dict(d_a)
         self.d_b.load_state_dict(d_b)
 
-
-class ImageFolderWithoutClass(ImageFolder):
-    def __getitem__(self, index):
-        img, _ = super(ImageFolderWithoutClass, self).__getitem__(index)
-        return img
-
-
 if __name__ == '__main__':
     from architectures.image2image import Generator, Discriminator
     
@@ -290,25 +278,48 @@ if __name__ == '__main__':
         gen_fn=Generator,
         disc_fn=Discriminator,
         gen_fn_params={'input_dim':3, 'num_filter':32, 'output_dim':3, 'num_resnet':6},
-        disc_fn_params={'input_dim':3, 'num_filter':64, 'output_dim':3},
+        disc_fn_params={'input_dim':3, 'num_filter':64, 'output_dim':1},
         gpu_mode='detect',
         opt_d_args={'lr':0.0002, 'betas':(0.5, 0.999)},
         opt_g_args={'lr':0.0002, 'betas':(0.5, 0.999)},
     )
+
+    # not sure if this is necessary??
+    net.g_atob.normal_weight_init(mean=0.0, std=0.02)
+    net.g_btoa.normal_weight_init(mean=0.0, std=0.02)
+    net.d_a.normal_weight_init(mean=0.0, std=0.02)
+    net.d_b.normal_weight_init(mean=0.0, std=0.02)
+    
     bs = 1
+    transforms = transforms.Compose([
+        transforms.ToTensor(), transforms.Normalize(mean=(0.5,0.5,0.5), std=(0.5,0.5,0.5))
+    ])
     ds_train_a = util.DatasetFromFolder("/data/lisa/data/beckhamc/cyclegan/datasets/horse2zebra/trainA/", resize_scale=286,
-                                        crop_size=256, fliplr=True, transform=transforms.ToTensor())
-    it_train_a = DataLoader(ds_train_a, batch_size=bs, shuffle=True, num_workers=0)
+                                        crop_size=256, fliplr=True, transform=transforms)
+    it_train_a = DataLoader(ds_train_a, batch_size=bs, shuffle=True)
     ds_train_b = util.DatasetFromFolder("/data/lisa/data/beckhamc/cyclegan/datasets/horse2zebra/trainB/", resize_scale=286,
-                                        crop_size=256, fliplr=True, transform=transforms.ToTensor())
-    it_train_b = DataLoader(ds_train_b, batch_size=bs, shuffle=True, num_workers=0)
+                                        crop_size=256, fliplr=True, transform=transforms)
+    it_train_b = DataLoader(ds_train_b, batch_size=bs, shuffle=True)
+    
+    ds_valid_a = util.DatasetFromFolder("/data/lisa/data/beckhamc/cyclegan/datasets/horse2zebra/testA/", resize_scale=286,
+                                        crop_size=256, fliplr=True, transform=transforms)
+    it_valid_a = DataLoader(ds_valid_a, batch_size=bs, shuffle=True)
+    ds_valid_b = util.DatasetFromFolder("/data/lisa/data/beckhamc/cyclegan/datasets/horse2zebra/testB/", resize_scale=286,
+                                        crop_size=256, fliplr=True, transform=transforms)
+    it_valid_b = DataLoader(ds_valid_b, batch_size=bs, shuffle=True)
+
+
+    #name = "cg_horse2zebra_gnf64_b9"
+    name = "cg_horse2zebra_fixed"
+    print net
+    #net.load("models/%s/40.pkl" % name)
     net.train(
         itr_a_train=it_train_a,
         itr_b_train=it_train_b,
-        itr_a_valid=it_train_a,
-        itr_b_valid=it_train_b,
-        epochs=10,
-        model_dir="models/cg_horse2zebra",
-        result_dir="results/cg_horse2zebra"
+        itr_a_valid=it_valid_a,
+        itr_b_valid=it_valid_b,
+        epochs=100,
+        model_dir="models/%s" % name,
+        result_dir="results/%s" % name,
     )
     
