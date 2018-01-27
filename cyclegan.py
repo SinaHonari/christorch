@@ -90,6 +90,7 @@ class CycleGAN():
               scheduler_args={},
               scheduler_metric='valid_loss',
               max_iters=-1,
+              vis_scale_factor=1.,
               verbose=True):
         """
         """
@@ -162,26 +163,18 @@ class CycleGAN():
                     btoa_atob = self.g_atob(btoa)
                     d_a_fake = self.d_a(btoa)
                     d_b_fake = self.d_b(atob)
-                    # constants
-                    ones_da, zeros_da = torch.ones(d_a_fake.size()), torch.zeros(d_a_fake.size())
-                    ones_db, zeros_db = torch.ones(d_b_fake.size()), torch.zeros(d_b_fake.size())                    
-                    if self.gpu_mode:
-                        ones_da, zeros_da, ones_db, zeros_db = \
-                                    ones_da.cuda(), zeros_da.cuda(), ones_db.cuda(), zeros_db.cuda()
-                    ones_da, zeros_da, ones_db, zeros_db = \
-                                    Variable(ones_da), Variable(zeros_da), Variable(ones_db), Variable(zeros_db)
                     ###################
                     # TRAIN GENERATOR #
                     ###################
-                    # gen A loss = squared_error(d_a_fake, 1).mean()
+                    ones_da = torch.ones(d_a_fake.size())
+                    ones_db = torch.ones(d_b_fake.size())
+                    if self.gpu_mode:
+                        ones_da, ones_db = ones_da.cuda(), ones_db.cuda()
+                    ones_da, ones_db = Variable(ones_da), Variable(ones_db)
                     btoa_gen_loss = self.mse_loss(d_a_fake, ones_da)
-                    # gen B loss = squared_error(d_b_fake, 1).mean()
                     atob_gen_loss = self.mse_loss(d_b_fake, ones_db)
-                    # atob cycle
                     cycle_aba = torch.mean(torch.abs(A_real - atob_btoa))
-                    # btoa cycle
                     cycle_bab = torch.mean(torch.abs(B_real - btoa_atob))
-                    # backprop for G
                     g_tot_loss = atob_gen_loss + btoa_gen_loss + self.lamb*cycle_aba + self.lamb*cycle_bab
                     if mode == 'train':
                         self.optim_g.zero_grad()
@@ -192,19 +185,21 @@ class CycleGAN():
                     #######################
                     d_a_real = self.d_a(A_real)
                     d_b_real = self.d_b(B_real)
-                    # ??????
                     A_fake = fake_A_pool.query(btoa)
                     B_fake = fake_B_pool.query(atob)
                     d_a_fake = self.d_a(A_fake)
                     d_b_fake = self.d_b(B_fake)
+                    ones_da_real, zeros_da_fake = torch.ones(d_a_real.size()), torch.zeros(d_a_fake.size())
+                    ones_db_real, zeros_db_fake = torch.ones(d_b_real.size()), torch.zeros(d_b_fake.size())
+                    if self.gpu_mode:
+                        ones_da_real, zeros_da_fake, ones_db_real, zeros_db_fake = \
+                                    ones_da_real.cuda(), zeros_da_fake.cuda(), ones_db_real.cuda(), zeros_db_fake.cuda()
+                    ones_da_real, zeros_da_fake, ones_db_real, zeros_db_fake = \
+                                    Variable(ones_da_real), Variable(zeros_da_fake), Variable(ones_db_real), Variable(zeros_db_fake)
                     # disc A loss = squared_error(d_a_real, 1).mean() + squared_error(d_a_fake, 0).mean()
-                    d_a_loss = (self.mse_loss(d_a_real, ones_da) + self.mse_loss(d_a_fake, zeros_da)) * 0.5
+                    d_a_loss = (self.mse_loss(d_a_real, ones_da_real) + self.mse_loss(d_a_fake, zeros_da_fake)) * 0.5
                     # disc B loss = squared_error(d_b_real, 1).mean() + squared_error(d_b_fake, 0).mean()
-                    d_b_loss = (self.mse_loss(d_b_real, ones_db) + self.mse_loss(d_b_fake, zeros_db)) * 0.5
-
-                    #import pdb
-                    #pdb.set_trace()
-                    
+                    d_b_loss = (self.mse_loss(d_b_real, ones_db_real) + self.mse_loss(d_b_fake, zeros_db_fake)) * 0.5
                     if mode == 'train':
                         # backprop for D_A
                         self.optim_d_a.zero_grad()
@@ -229,12 +224,13 @@ class CycleGAN():
                         outs = [A_real, atob, atob_btoa, B_real, btoa, btoa_atob]
                         outs_np = [ x.data.cpu().numpy() for x in outs ]
                         shp = outs_np[0].shape[-1]
-                        bs = outs_np[0].shape[0]
+                        # possible that A_real.bs != B_real.bs
+                        bs = np.min([outs_np[0].shape[0], outs_np[3].shape[0]])
                         grid = np.zeros((shp*bs, shp*6, 3))
                         for j in range(bs):
                             for i in range(6):
                                 grid[j*shp:(j+1)*shp,i*shp:(i+1)*shp,:] = util.convert_to_rgb(outs_np[i][j])
-                        imsave(arr=rescale(grid, scale=0.5), fname="%s/%i_%s.png" % (result_dir, epoch+1, mode))
+                        imsave(arr=rescale(grid, scale=vis_scale_factor), fname="%s/%i_%s.png" % (result_dir, epoch+1, mode))
                 if verbose:
                     pbar.close()
                 #########

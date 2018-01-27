@@ -118,7 +118,8 @@ def get_resnet(kind):
         '18': (BasicBlock, [2,2,2,2]),
         '34': (BasicBlock, [3,4,6,3]),
         '50': (Bottleneck, [3,4,6,3]),
-        '101': (Bottleneck, [3,4,23,3])
+        '101': (Bottleneck, [3,4,23,3]),
+        '152': (Bottleneck, [3,8,36,3])
     }
     return ResNetCore(block=layer_spec[kind][0], layers=layer_spec[kind][1])
 

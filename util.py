@@ -26,16 +26,6 @@ def convert_to_rgb(img, is_grayscale=False):
         imgp /= 255.
     return np.clip(imgp.transpose((1, 2, 0)), 0, 1)
 
-def _get_slices(length, bs):
-    slices = []
-    b = 0
-    while True:
-        if b*bs >= length:
-            break
-        slices.append( slice(b*bs, (b+1)*bs) )
-        b += 1
-    return slices
-
 def rnd_crop(img, data_format='channels_last'):
     assert data_format in ['channels_first', 'channels_last']
     from skimage.transform import resize
@@ -83,14 +73,13 @@ def zmuv(img):
     for i in range(0, img2.shape[0]):
         print np.std(img2[i,...])
         img2[i, ...] = (img2[i, ...] - np.mean(img2[i, ...])) / np.std(img2[i,...]) # zmuv
-    print np.min(img2), np.max(img2)
+    #print np.min(img2), np.max(img2)
     return img2
 
 def swap_axes(img):
     img2 = np.copy(img)
     img2 = img2.swapaxes(3,2).swapaxes(2,1)
     return img2
-
 
 def int_to_ord(labels, num_classes):
     """
@@ -125,37 +114,42 @@ import torch.utils.data.dataset as dataset
 class NumpyDataset(dataset.Dataset):
     def __init__(self, X, ys, keras_imgen=None, rnd_state=np.random.RandomState(0), reorder_channels=False):
         """
-        keras_preprocessor: cannot use torchvision PIL transforms,
-          so just use Keras' shit here.
+        keras_preprocessor: cannot use torchvision PIL transforms, so just use Keras' shit here.
         reorder_channels: in the event that X is in the form (bs, h, w, f), if this flag is set to
           True, we will reshape the x batches so that they are in the form (bs, f, h, w). Note that
           if this is required, you should make sure that the Keras data augmentor knows to use
           channels_last (TF-style tensors) rather than channels_first.
         """
         self.X = X
-        if type(ys) != list:
-            ys = [ys]
-        for y in ys:
-            assert len(y) == len(X)
+        if ys != None:
+            # => we're dealing with classifier iterator
+            if type(ys) != list:
+                ys = [ys]
+            for y in ys:
+                assert len(y) == len(X)
+        else:
+            pass
         self.ys = ys
-        assert len(X) == len(y)
         self.N = len(X)
         self.keras_imgen = keras_imgen
         self.rnd_state = rnd_state
         self.reorder_channels = reorder_channels
     def __getitem__(self, index):
-        #xx, yy = self.X[index], self.y[index]
         xx = self.X[index]
-        yy = []
-        for y in self.ys:
-            yy.append(y[index])
-        yy = np.asarray(yy)
+        if self.ys != None:
+            yy = []
+            for y in self.ys:
+                yy.append(y[index])
+            yy = np.asarray(yy)
         if self.keras_imgen != None:
             seed = self.rnd_state.randint(0, 100000)
             xx = self.keras_imgen.flow(xx[np.newaxis], None, batch_size=1, seed=seed, shuffle=False).next()[0]
         if self.reorder_channels:
-            xx = xx.swapaxes(3,2).swapaxes(2,1)
-        return xx, yy
+            xx = xx.swapaxes(2,1).swapaxes(1,0)
+        if self.ys != None:
+            return xx, yy
+        else:
+            return xx
     def __len__(self):
         return self.N
 
@@ -163,13 +157,27 @@ from PIL import Image
     
 class DatasetFromFolder(Dataset):
     """
+    
+
+    Notes
+    -----
     Courtesy of:
     https://github.com/togheppi/CycleGAN/blob/master/dataset.py
+    With some extra modifications done by me.
     """
-    def __init__(self, image_dir, subfolder='', transform=None, resize_scale=None, crop_size=None, fliplr=False):
+    def __init__(self, image_dir, subfolder='', images=None, transform=None, resize_scale=None, crop_size=None, fliplr=False):
+        """
+        images: a list of images you want instead. If set to `None` then it gets all
+          images in the directory specified by `image_dir` and `subfolder`.
+        """
         super(DatasetFromFolder, self).__init__()
         self.input_path = os.path.join(image_dir, subfolder)
-        self.image_filenames = [x for x in sorted(os.listdir(self.input_path))]
+        if images == None:
+            self.image_filenames = [x for x in sorted(os.listdir(self.input_path))]
+        else:
+            if type(images) != set:
+                images = set(images)
+            self.image_filenames = [ os.path.join(os.path.join(image_dir,subfolder),fname) for fname in images ]
         self.transform = transform
         self.resize_scale = resize_scale
         self.crop_size = crop_size
@@ -230,6 +238,11 @@ class ImagePool():
         return return_images
     
 if __name__ == '__main__':
+
+    tmp = DatasetFromFolder("/data/lisa/data/beckhamc/dr-data/train-trim-256/")
+    import pdb
+    pdb.set_trace()
+
     #tmp = H5Dataset()
     '''
     loader = test_image_folder(1)
