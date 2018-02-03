@@ -1,3 +1,5 @@
+from __future__ import print_function
+
 from torchvision.models import resnet
 from torchvision.models.resnet import ResNet, BasicBlock
 import torch
@@ -24,8 +26,6 @@ class CMF(nn.Module):
         for k in range(0, num_classes):
             self.uro.weight.data[k,0:(k+1)] += 1.
         self.uro.weight.requires_grad = False
-        #print self.uro.weight.data
-        #print W
     def forward(self, x):
         return self.uro(x)
 
@@ -371,7 +371,7 @@ if __name__ == '__main__':
     #loss.backward()
     #ctd = CumulativeToDiscrete(4)
     
-    print net
+    print(net)
     import pdb
     pdb.set_trace()
     

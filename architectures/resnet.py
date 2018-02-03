@@ -1,3 +1,5 @@
+from __future__ import print_function
+
 from torchvision.models import resnet
 from torchvision.models.resnet import ResNet, BasicBlock, Bottleneck
 import torch
@@ -63,7 +65,6 @@ class ResNetCore(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        print x.size()
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -109,8 +110,8 @@ class ResNetTwoOutput(nn.Module):
         out2 = self.cls2(x)
         return {'p1': F.log_softmax(out1), 'p2': F.log_softmax(out2)}
 
-    
-from extensions import BinomialExtension
+
+from . import extensions
 
 def get_resnet(kind):
     assert kind in ['18', '34', '50', '101', '152']
@@ -133,16 +134,14 @@ class BinomialResNet(nn.Module):
         features = get_resnet(kind)
         if extra_fc:
             self.features = nn.Sequential(features, nn.Linear(512, num_classes), nn.ReLU())
-            self.classifier = BinomialExtension(num_classes, num_classes, learn_tau=learn_tau)
+            self.classifier = extensions.BinomialExtension(num_classes, num_classes, learn_tau=learn_tau)
         else:
             self.features = features
-            self.classifier = BinomialExtension(512, num_classes, learn_tau=learn_tau)
+            self.classifier = extensions.BinomialExtension(512, num_classes, learn_tau=learn_tau)
     def forward(self, x):
         x = self.features(x)
         x = self.classifier(x)
         return {'p1': torch.log(x)}
-
-from extensions import POM
     
 class PomResNet(nn.Module):
     """
@@ -160,17 +159,15 @@ class PomResNet(nn.Module):
         # discrete probs we get the k units back
         if extra_fc:
             self.features = nn.Sequential(features, nn.Linear(512, num_classes), nn.ReLU())
-            self.classifier = POM(num_classes, num_classes, nonlinearity=nonlinearity)
+            self.classifier = extensions.POM(num_classes, num_classes, nonlinearity=nonlinearity)
         else:
             self.features = features
-            self.classifier = POM(512, num_classes, nonlinearity=nonlinearity)
+            self.classifier = extensions.POM(512, num_classes, nonlinearity=nonlinearity)
         self.keys = ['p1']
     def forward(self, x):
         x = self.features(x)
         x = self.classifier(x)
         return {'p1': torch.log(x)}
-
-from extensions import StickBreakingOrdinal
     
 class StickBreakingResNet(nn.Module):
     """
@@ -183,7 +180,7 @@ class StickBreakingResNet(nn.Module):
         super(StickBreakingResNet, self).__init__()
         features = get_resnet(kind)
         self.features = features
-        self.classifier = StickBreakingOrdinal(512, num_classes)
+        self.classifier = extensions.StickBreakingOrdinal(512, num_classes)
         self.keys = ['p1']
     def forward(self, x):
         x = self.features(x)
@@ -206,6 +203,6 @@ if __name__ == '__main__':
     loss = torch.mean(out)
     loss.backward()
     
-    print net
+    print(net)
     import pdb
     pdb.set_trace()

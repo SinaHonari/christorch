@@ -1,3 +1,5 @@
+from __future__ import print_function
+
 import torch
 import os
 import numpy as np
@@ -69,9 +71,7 @@ def min_max(img):
 
 def zmuv(img):
     img2 = np.copy(img)
-    print np.min(img2), np.max(img2)
     for i in range(0, img2.shape[0]):
-        print np.std(img2[i,...])
         img2[i, ...] = (img2[i, ...] - np.mean(img2[i, ...])) / np.std(img2[i,...]) # zmuv
     #print np.min(img2), np.max(img2)
     return img2
@@ -236,21 +236,3 @@ class ImagePool():
                     return_images.append(image)
         return_images = Variable(torch.cat(return_images, 0))
         return return_images
-    
-if __name__ == '__main__':
-
-    tmp = DatasetFromFolder("/data/lisa/data/beckhamc/dr-data/train-trim-256/")
-    import pdb
-    pdb.set_trace()
-
-    #tmp = H5Dataset()
-    '''
-    loader = test_image_folder(1)
-    for x,y in loader:
-        print x,y
-        import pdb
-        pdb.set_trace()
-    '''
-
-    
-    

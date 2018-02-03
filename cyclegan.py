@@ -1,20 +1,25 @@
-import torch, time, os, pickle
+from __future__ import print_function
+
+import time, os, pickle, sys, math
 import numpy as np
+# torch imports
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.autograd import Variable
 from torch.utils.data import DataLoader, Dataset
+# torchvision
 from torchvision.datasets import ImageFolder
 from torchvision import datasets, transforms
 from collections import OrderedDict
-import os
-import sys
-import math
+
 from tqdm import tqdm
 import h5py
-import util
+from . import util
 import itertools
+
+import logging
 
 from skimage.io import imsave
 from skimage.transform import rescale
@@ -31,8 +36,10 @@ class CycleGAN():
     def __init__(self,
                  gen_fn,
                  disc_fn,
-                 gen_fn_params={},
-                 disc_fn_params={},
+                 gen_fn_atob_params={},
+                 disc_fn_a_params={},
+                 gen_fn_btoa_params=None,
+                 disc_fn_b_params=None,
                  opt_g=optim.Adam, opt_g_args={},
                  opt_d=optim.Adam, opt_d_args={},
                  lamb=10.,
@@ -41,27 +48,19 @@ class CycleGAN():
         assert gpu_mode in [True, False, 'detect']
         if gpu_mode == 'detect':
             gpu_mode = True if torch.cuda.is_available() else False
+        if gen_fn_btoa_params is None:
+            gen_fn_btoa_params = gen_fn_atob_params
+        if disc_fn_b_params is None:
+            disc_fn_b_params = disc_fn_a_params
         self.lamb = lamb
-        #######################
-        # NETWORK DEFINITIONS #
-        #######################
-        self.g_atob = gen_fn(**gen_fn_params)
-        self.g_btoa = gen_fn(**gen_fn_params)
-        self.d_a = disc_fn(**disc_fn_params)
-        self.d_b = disc_fn(**disc_fn_params)
-        ##########
-        # LOSSES #
-        ##########
+        self.g_atob = gen_fn(**gen_fn_atob_params)
+        self.g_btoa = gen_fn(**gen_fn_btoa_params)
+        self.d_a = disc_fn(**disc_fn_a_params)
+        self.d_b = disc_fn(**disc_fn_b_params)
         self.mse_loss = torch.nn.MSELoss()
-        ##############
-        # OPTIMISERS #
-        ##############
         self.optim_g = opt_g( itertools.chain(self.g_atob.parameters(), self.g_btoa.parameters()), **opt_g_args)
         self.optim_d_a = opt_d( self.d_a.parameters(), **opt_d_args)
         self.optim_d_b = opt_d( self.d_b.parameters(), **opt_d_args)
-        #########
-        # OTHER #
-        #########
         self.hooks = hooks
         self.gpu_mode = gpu_mode
         if self.gpu_mode:
@@ -76,10 +75,10 @@ class CycleGAN():
             nvmlInit()
             handle = nvmlDeviceGetHandleByIndex(0)
             totalMemory = nvmlDeviceGetMemoryInfo(handle)
-            print "GPU memory used:", totalMemory.used / 1024. / 1024.
+            logging.debug("GPU memory used:", totalMemory.used / 1024. / 1024.)
         except Exception as e:
-            print "Was unable to detect amount of GPU memory used"
-            print e
+            logging.debug("Was unable to detect amount of GPU memory used")
+            logging.debug(e)
     def train(self,
               itr_a_train, itr_b_train,
               itr_a_valid, itr_b_valid,
@@ -92,8 +91,6 @@ class CycleGAN():
               max_iters=-1,
               vis_scale_factor=1.,
               verbose=True):
-        """
-        """
         for folder_name in [model_dir, result_dir]:
             if folder_name is not None and not os.path.exists(folder_name):
                 os.makedirs(folder_name)
@@ -101,7 +98,7 @@ class CycleGAN():
         #    scheduler = scheduler(self.optim, **scheduler_args)
         #else:
         #    scheduler = None
-        f = open("%s/results.txt" % result_dir, "wb" if not resume else "a") if result_dir != None else None
+        f = open("%s/results.txt" % result_dir, "w" if not resume else "a") if result_dir != None else None
         start_time = time.time()
         stats_keys = ['epoch',
                       'train_g_atob_loss', 'train_g_btoa_loss', 'train_aba_loss', 'train_bab_loss',
@@ -122,7 +119,7 @@ class CycleGAN():
                 if f != None and not resume:
                     f.write(",".join(stats.keys()) + "\n")
                 if verbose:
-                    print ",".join(stats.keys())                
+                    print(",".join(stats.keys()))
             epoch_start_time = time.time()
             # accumulator to be able to compute averages
             tmp_stats = {
@@ -144,8 +141,6 @@ class CycleGAN():
                 if verbose:
                     pbar = tqdm(total=n_iters)
                 # we will use rnd_b to find a random img to dump
-                rnd_b = np.random.randint(0, n_iters)
-                #rnd_b = 1
                 for b, (A_real, B_real) in enumerate(zip(itr_A, itr_B)):
                     if max_iters > 0 and b == max_iters:
                         break
@@ -219,18 +214,11 @@ class CycleGAN():
                     tmp_stats['%s_da_loss' % mode].append(d_a_loss.data[0])
                     tmp_stats['%s_db_loss' % mode].append(d_b_loss.data[0])
                     #########
-                    if b == rnd_b:
-                        # print out example from val set to disk
+                    if b == 0:
                         outs = [A_real, atob, atob_btoa, B_real, btoa, btoa_atob]
                         outs_np = [ x.data.cpu().numpy() for x in outs ]
-                        shp = outs_np[0].shape[-1]
-                        # possible that A_real.bs != B_real.bs
-                        bs = np.min([outs_np[0].shape[0], outs_np[3].shape[0]])
-                        grid = np.zeros((shp*bs, shp*6, 3))
-                        for j in range(bs):
-                            for i in range(6):
-                                grid[j*shp:(j+1)*shp,i*shp:(i+1)*shp,:] = util.convert_to_rgb(outs_np[i][j])
-                        imsave(arr=rescale(grid, scale=vis_scale_factor), fname="%s/%i_%s.png" % (result_dir, epoch+1, mode))
+                        for hook_fn in self.hooks:
+                            hook_fn(*outs_np, epoch=epoch, mode=mode)
                 if verbose:
                     pbar.close()
                 #########
@@ -238,13 +226,13 @@ class CycleGAN():
                     stats[key] = np.mean( tmp_stats[key] )
             stats['lr_g'] = self.optim_g.state_dict()['param_groups'][0]['lr']
             stats['lr_da'] = self.optim_d_a.state_dict()['param_groups'][0]['lr']
-            stats['lr_db'] = self.optim_d_b.state_dict()['param_groups'][0]['lr']            
+            stats['lr_db'] = self.optim_d_b.state_dict()['param_groups'][0]['lr']
             stats['time'] = time.time() - epoch_start_time
             # update the learning rate scheduler, if applicable
             #if scheduler != None:
             #    scheduler.step(stats[scheduler_metric])
             str_ = ",".join([ str(stats[key]) for key in stats ])
-            print str_            
+            print(str_)
             if f != None:
                 f.write(str_ + "\n")
                 f.flush()
@@ -266,56 +254,3 @@ class CycleGAN():
         self.g_btoa.load_state_dict(g_btoa)
         self.d_a.load_state_dict(d_a)
         self.d_b.load_state_dict(d_b)
-
-if __name__ == '__main__':
-    from architectures.image2image import Generator, Discriminator
-    
-    net = CycleGAN(
-        gen_fn=Generator,
-        disc_fn=Discriminator,
-        gen_fn_params={'input_dim':3, 'num_filter':32, 'output_dim':3, 'num_resnet':6},
-        disc_fn_params={'input_dim':3, 'num_filter':64, 'output_dim':1},
-        gpu_mode='detect',
-        opt_d_args={'lr':0.0002, 'betas':(0.5, 0.999)},
-        opt_g_args={'lr':0.0002, 'betas':(0.5, 0.999)},
-    )
-
-    # not sure if this is necessary??
-    net.g_atob.normal_weight_init(mean=0.0, std=0.02)
-    net.g_btoa.normal_weight_init(mean=0.0, std=0.02)
-    net.d_a.normal_weight_init(mean=0.0, std=0.02)
-    net.d_b.normal_weight_init(mean=0.0, std=0.02)
-    
-    bs = 1
-    transforms = transforms.Compose([
-        transforms.ToTensor(), transforms.Normalize(mean=(0.5,0.5,0.5), std=(0.5,0.5,0.5))
-    ])
-    ds_train_a = util.DatasetFromFolder("/data/lisa/data/beckhamc/cyclegan/datasets/horse2zebra/trainA/", resize_scale=286,
-                                        crop_size=256, fliplr=True, transform=transforms)
-    it_train_a = DataLoader(ds_train_a, batch_size=bs, shuffle=True)
-    ds_train_b = util.DatasetFromFolder("/data/lisa/data/beckhamc/cyclegan/datasets/horse2zebra/trainB/", resize_scale=286,
-                                        crop_size=256, fliplr=True, transform=transforms)
-    it_train_b = DataLoader(ds_train_b, batch_size=bs, shuffle=True)
-    
-    ds_valid_a = util.DatasetFromFolder("/data/lisa/data/beckhamc/cyclegan/datasets/horse2zebra/testA/", resize_scale=286,
-                                        crop_size=256, fliplr=True, transform=transforms)
-    it_valid_a = DataLoader(ds_valid_a, batch_size=bs, shuffle=True)
-    ds_valid_b = util.DatasetFromFolder("/data/lisa/data/beckhamc/cyclegan/datasets/horse2zebra/testB/", resize_scale=286,
-                                        crop_size=256, fliplr=True, transform=transforms)
-    it_valid_b = DataLoader(ds_valid_b, batch_size=bs, shuffle=True)
-
-
-    #name = "cg_horse2zebra_gnf64_b9"
-    name = "cg_horse2zebra_fixed"
-    print net
-    #net.load("models/%s/40.pkl" % name)
-    net.train(
-        itr_a_train=it_train_a,
-        itr_b_train=it_train_b,
-        itr_a_valid=it_valid_a,
-        itr_b_valid=it_valid_b,
-        epochs=100,
-        model_dir="models/%s" % name,
-        result_dir="results/%s" % name,
-    )
-    
