@@ -32,7 +32,11 @@ from skimage.transform import rescale, resize
 def cg_dump_vis(out_folder, scale_factor=1.):
     """
     """
-    def _fn(A_real, atob, atob_btoa, B_real, btoa, btoa_atob, **kwargs):
+    def _fn(losses, inputs, outputs, kwargs):
+        A_real = inputs[0].data.cpu().numpy()
+        B_real = inputs[1].data.cpu().numpy()
+        atob, atob_btoa, btoa, btoa_atob = \
+            [elem.data.cpu().numpy() for elem in outputs.values()]
         outs_np = [A_real, atob, atob_btoa, B_real, btoa, btoa_atob]
         # determine # of channels
         n_channels = outs_np[0].shape[1]
