@@ -34,6 +34,7 @@ class CycleGAN():
                  opt_g=optim.Adam, opt_g_args={},
                  opt_d=optim.Adam, opt_d_args={},
                  lamb=10.,
+                 beta=5.,
                  pool_size=50,
                  handlers=[],
                  use_cuda='detect'):
@@ -41,6 +42,7 @@ class CycleGAN():
         if use_cuda == 'detect':
             use_cuda = True if torch.cuda.is_available() else False
         self.lamb = lamb
+        self.beta = beta
         self.g_atob = gen_atob_fn
         self.g_btoa = gen_btoa_fn
         self.d_a = disc_a_fn
@@ -74,13 +76,15 @@ class CycleGAN():
         """Return all the losses related to generation"""
         atob_gen_loss = self.mse(self.d_b(atob), 1)
         cycle_aba = torch.mean(torch.abs(A_real - atob_btoa))
-        return atob_gen_loss, cycle_aba
+        cycle_id_a = torch.mean(torch.abs(A_real - self.g_btoa(A_real)))
+        return atob_gen_loss, cycle_aba, cycle_id_a
 
     def compute_g_losses_bab(self, B_real, btoa, btoa_atob):
         """Return all the losses related to generation"""
         btoa_gen_loss = self.mse(self.d_a(btoa), 1)
         cycle_bab = torch.mean(torch.abs(B_real - btoa_atob))
-        return btoa_gen_loss, cycle_bab
+        cycle_id_b = torch.mean(torch.abs(B_real - self.g_atob(B_real)))
+        return btoa_gen_loss, cycle_bab, cycle_id_b
 
     def compute_d_losses(self, A_real, atob, B_real, btoa):
         """Return all losses related to discriminator"""
@@ -121,17 +125,17 @@ class CycleGAN():
         self._train()
         atob = self.g_atob(A_real)
         atob_btoa = self.g_btoa(atob)
-        atob_gen_loss, cycle_aba = self.compute_g_losses_aba(
+        atob_gen_loss, cycle_aba, cycle_id_a = self.compute_g_losses_aba(
             A_real, atob, atob_btoa)
-        g_tot_loss = atob_gen_loss + self.lamb*cycle_aba
+        g_tot_loss = atob_gen_loss + self.lamb*cycle_aba + self.beta*cycle_id_a
         self.optim_g.zero_grad()
         g_tot_loss.backward()
         self.optim_g.step()
         btoa = self.g_btoa(B_real)
         btoa_atob = self.g_atob(btoa)
-        btoa_gen_loss, cycle_bab = self.compute_g_losses_bab(
+        btoa_gen_loss, cycle_bab, cycle_id_b = self.compute_g_losses_bab(
             B_real, btoa, btoa_atob)
-        g_tot_loss = btoa_gen_loss + self.lamb*cycle_bab
+        g_tot_loss = btoa_gen_loss + self.lamb*cycle_bab + self.beta*cycle_id_b
         self.optim_g.zero_grad()
         g_tot_loss.backward()
         self.optim_g.step()
@@ -145,8 +149,10 @@ class CycleGAN():
         losses = {
             'atob_gen': atob_gen_loss.item(),
             'cycle_aba': cycle_aba.item(),
+            'cycle_id_a': cycle_id_a.item(),
             'btoa_gen': btoa_gen_loss.item(),
             'cycle_bab': cycle_bab.item(),
+            'cycle_id_b': cycle_id_b.item(),
             'd_a': d_a_loss.item(),
             'd_b': d_b_loss.item()
         }
@@ -164,19 +170,21 @@ class CycleGAN():
         with torch.no_grad():
             atob = self.g_atob(A_real)
             atob_btoa = self.g_btoa(atob)
-            atob_gen_loss, cycle_aba = self.compute_g_losses_aba(
+            atob_gen_loss, cycle_aba, cycle_id_a = self.compute_g_losses_aba(
                 A_real, atob, atob_btoa)
             btoa = self.g_btoa(B_real)
             btoa_atob = self.g_atob(btoa)
-            btoa_gen_loss, cycle_bab = self.compute_g_losses_bab(
+            btoa_gen_loss, cycle_bab, cycle_id_b = self.compute_g_losses_bab(
                 B_real, btoa, btoa_atob)
             d_a_loss, d_b_loss = self.compute_d_losses(
                 A_real, atob, B_real, btoa)
         losses = {
             'atob_gen': atob_gen_loss.item(),
             'cycle_aba': cycle_aba.item(),
+            'cycle_id_a': cycle_id_a.item(),
             'btoa_gen': btoa_gen_loss.item(),
             'cycle_bab': cycle_bab.item(),
+            'cycle_id_b': cycle_id_b.item(),
             'd_a': d_a_loss.item(),
             'd_b': d_b_loss.item()
         }
