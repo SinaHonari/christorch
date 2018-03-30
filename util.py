@@ -174,10 +174,10 @@ class NumpyDataset(dataset.Dataset):
         return self.N
 
 from PIL import Image
-    
+
 class DatasetFromFolder(Dataset):
     """
-    
+    Specify specific folders to load images from.
 
     Notes
     -----
@@ -186,67 +186,36 @@ class DatasetFromFolder(Dataset):
     With some extra modifications done by me.
     """
     def __init__(self, image_dir, images=None, transform=None,
-                 resize_scale=None, crop_size=None, fliplr=False, append_label=None):
+                 append_label=None):
         """
         Parameters
         ----------
         image_dir: directory where the images are located
-        subfolder: if specified, ????
-        images: a list of images you want instead. If set to `None` then it gets all
+        images: a list of images you want instead. If set to `None` it gets all
           images in the directory specified by `image_dir`.
-        resize_scale: a tuple (w,h) denoting the resolution to resize to. Note that if
-          `crop_size` is also defined, this will happen before the cropping.
-        crop_size: a tuple (w,h) denoting the size of random crops to be made from
-          this image.
+        transform:
         fliplr: enable left/right flip augmentation?
-        append_label: if an int is provided, then `__getitem__` will return not just
-          the image x, but (x,y), where y denotes the label. This means that this
-          iterator could also be used for classifiers.
+        append_label: if an int is provided, then `__getitem__` will return
+          not just the image x, but (x,y), where y denotes the label. This
+          means that this iterator could also be used for classifiers.
         """
         super(DatasetFromFolder, self).__init__()
-        #self.input_path = os.path.join(image_dir, subfolder)
         self.input_path = image_dir
-        if images == None:
-            self.image_filenames = [x for x in sorted(os.listdir(self.input_path))]
+        if images is None:
+            self.image_filenames = [x for x in
+                                    sorted(os.listdir(self.input_path))]
         else:
             if type(images) != set:
                 images = set(images)
-            self.image_filenames = [ os.path.join(image_dir, fname) for fname in images ]
+            self.image_filenames = [os.path.join(image_dir, fname)
+                                    for fname in images]
         self.transform = transform
-        if type(resize_scale) == int:
-            resize_scale = (resize_scale, resize_scale)
-        self.resize_scale = resize_scale
-        self.crop_size = crop_size
-        self.fliplr = fliplr
         self.append_label = append_label
     def __getitem__(self, index):
         # Load Image
-        img_fn = os.path.join(self.input_path, self.image_filenames[index])
+        img_fn = os.path.join(self.input_path,
+                              self.image_filenames[index])
         img = Image.open(img_fn).convert('RGB')
-        orig_w, orig_h = img.width, img.height
-        # preprocessing
-        if self.resize_scale != None:
-            # if the tuple is float, then do relative resizing, otherwise
-            # do absolute resize
-            if self.resize_scale[0] < 1 and self.resize_scale[1] < 1:
-                # if the resized version will be smaller than the crop size, then
-                # we should skip this operation
-                if self.crop_size != None and (int(img.width*self.resize_scale[0]) < self.crop_size or \
-                   int(img.height*self.resize_scale[1]) < self.crop_size):
-                    pass
-                else:
-                    img = img.resize(
-                        ( int(img.width*self.resize_scale[0]), int(img.height*self.resize_scale[1])), Image.BILINEAR)
-            else:
-                img = img.resize((self.resize_scale[0], self.resize_scale[1]), Image.BILINEAR)
-        if self.crop_size:
-            assert (img.width - self.crop_size+1) > 0
-            x = np.random.randint(0, img.width - self.crop_size + 1)
-            y = np.random.randint(0, img.height - self.crop_size + 1)
-            img = img.crop((x, y, x + self.crop_size, y + self.crop_size))
-        if self.fliplr:
-            if np.random.random() < 0.5:
-                img = img.transpose(Image.FLIP_LEFT_RIGHT)
         if self.transform is not None:
             img = self.transform(img)
         if self.append_label is not None:
