@@ -186,7 +186,7 @@ class DatasetFromFolder(Dataset):
     With some extra modifications done by me.
     """
     def __init__(self, image_dir, images=None, transform=None,
-                 append_label=None):
+                 append_label=None, bit16=False):
         """
         Parameters
         ----------
@@ -211,11 +211,19 @@ class DatasetFromFolder(Dataset):
                                     for fname in images]
         self.transform = transform
         self.append_label = append_label
+        self.bit16 = bit16
     def __getitem__(self, index):
         # Load Image
         img_fn = os.path.join(self.input_path,
                               self.image_filenames[index])
-        img = Image.open(img_fn).convert('RGB')
+        if self.bit16:
+            from skimage.io import imread
+            img = imread(img_fn)
+            img = img.astype("float32") / 65535.
+            img = (img*255.).astype("uint8")
+            img = Image.fromarray(img)
+        else:
+            img = Image.open(img_fn).convert('RGB')
         if self.transform is not None:
             img = self.transform(img)
         if self.append_label is not None:
@@ -253,7 +261,7 @@ class ImagePool():
     def query(self, images):
         from torch.autograd import Variable
         if self.pool_size == 0:
-            return Variable(images.data)
+            return images.detach()
         return_images = []
         for image in images.data:
             image = torch.unsqueeze(image, 0)
