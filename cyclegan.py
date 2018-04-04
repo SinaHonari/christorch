@@ -5,13 +5,15 @@ import numpy as np
 # torch imports
 import torch
 import torch.optim as optim
-from torch.autograd import Variable
+from torch.autograd import Variable, grad
 # torchvision
 from collections import OrderedDict
 
 from tqdm import tqdm
 from . import util
 import itertools
+
+from torch.nn.utils import clip_grad_norm
 
 import logging
 
@@ -35,6 +37,7 @@ class CycleGAN():
                  opt_d=optim.Adam, opt_d_args={},
                  lamb=10.,
                  beta=5.,
+                 dnorm=None,
                  pool_size=50,
                  handlers=[],
                  use_cuda='detect'):
@@ -43,6 +46,7 @@ class CycleGAN():
             use_cuda = True if torch.cuda.is_available() else False
         self.lamb = lamb
         self.beta = beta
+        self.dnorm = dnorm
         self.g_atob = gen_atob_fn
         self.g_btoa = gen_btoa_fn
         self.d_a = disc_a_fn
@@ -52,8 +56,8 @@ class CycleGAN():
                 self.g_atob.parameters(),
                 self.g_btoa.parameters()),
             **opt_g_args)
-        self.optim_d_a = opt_d( self.d_a.parameters(), **opt_d_args)
-        self.optim_d_b = opt_d( self.d_b.parameters(), **opt_d_args)
+        self.optim_d_a = opt_d(self.d_a.parameters(), **opt_d_args)
+        self.optim_d_b = opt_d(self.d_b.parameters(), **opt_d_args)
         self.handlers = handlers
         self.use_cuda = use_cuda
         self.fake_A_pool = util.ImagePool(pool_size)
@@ -88,11 +92,49 @@ class CycleGAN():
 
     def compute_d_losses(self, A_real, atob, B_real, btoa):
         """Return all losses related to discriminator"""
+        fake_a = self.fake_A_pool.query(btoa)
+        fake_b = self.fake_B_pool.query(atob)
+        d_a_fake = self.d_a(fake_a)
+        d_b_fake = self.d_b(fake_b)
         d_a_loss = 0.5*(self.mse(self.d_a(A_real), 1) +
-                        self.mse(self.d_a(self.fake_A_pool.query(btoa)), 0))
+                        self.mse(d_a_fake, 0))
         d_b_loss = 0.5*(self.mse(self.d_b(B_real), 1) +
-                        self.mse(self.d_b(self.fake_B_pool.query(atob)), 0))
+                        self.mse(d_b_fake, 0))
         return d_a_loss, d_b_loss
+
+    def compute_d_norms(self, atob, btoa):
+        '''
+        fake_a = self.fake_A_pool.query(btoa)
+        fake_b = self.fake_B_pool.query(atob)
+        fake_a = Variable(fake_a.data, requires_grad=True)
+        fake_b = Variable(fake_b.data, requires_grad=True)
+        d_a_fake = self.d_a(fake_a)
+        d_b_fake = self.d_b(fake_b)
+        if self.dnorm > 0:
+            this_ones_dafake = torch.ones(d_a_fake.size())
+            this_ones_dbfake = torch.ones(d_b_fake.size())
+            if self.use_cuda:
+                this_ones_dafake = this_ones_dafake.cuda()
+                this_ones_dbfake = this_ones_dbfake.cuda()
+            gradients_da = grad(outputs=d_a_fake,
+                                inputs=fake_a,
+                                grad_outputs=this_ones_dafake,
+                                create_graph=True,
+                                retain_graph=True,
+                                only_inputs=True)[0]
+            gradients_db = grad(outputs=d_b_fake,
+                                inputs=fake_b,
+                                grad_outputs=this_ones_dbfake,
+                                create_graph=True,
+                                retain_graph=True,
+                                only_inputs=True)[0]
+            gp_a = ((gradients_da.view(gradients_da.size()[0], -1).norm(2, 1) - 1) ** 2).mean()
+            gp_b = ((gradients_db.view(gradients_db.size()[0], -1).norm(2, 1) - 1) ** 2).mean()
+        else:
+            gp_a, gp_b = None, None
+        return gp_a, 0
+        '''
+        raise NotImplementedError("TODO")
 
     def _zip(self, A, B):
         if sys.version[0] == '2':
@@ -130,21 +172,23 @@ class CycleGAN():
         g_tot_loss = atob_gen_loss + self.lamb*cycle_aba + self.beta*cycle_id_a
         self.optim_g.zero_grad()
         g_tot_loss.backward()
-        self.optim_g.step()
         btoa = self.g_btoa(B_real)
         btoa_atob = self.g_atob(btoa)
         btoa_gen_loss, cycle_bab, cycle_id_b = self.compute_g_losses_bab(
             B_real, btoa, btoa_atob)
         g_tot_loss = btoa_gen_loss + self.lamb*cycle_bab + self.beta*cycle_id_b
-        self.optim_g.zero_grad()
         g_tot_loss.backward()
-        self.optim_g.step()
         d_a_loss, d_b_loss = self.compute_d_losses(A_real, atob, B_real, btoa)
         self.optim_d_a.zero_grad()
-        d_a_loss.backward()
-        self.optim_d_a.step()
         self.optim_d_b.zero_grad()
+        d_a_loss.backward()
         d_b_loss.backward()
+        if self.dnorm > 0.:
+            gp_a, gp_b = self.compute_d_norms(atob, btoa)
+            (gp_a*self.dnorm).backward()
+            (gp_b*self.dnorm).backward()
+        self.optim_g.step()
+        self.optim_d_a.step()
         self.optim_d_b.step()
         losses = {
             'atob_gen': atob_gen_loss.item(),
@@ -212,19 +256,24 @@ class CycleGAN():
               epochs, model_dir, result_dir,
               resume=False,
               save_every=1,
-              scheduler=None,
+              scheduler_fn=None,
               scheduler_args={},
-              scheduler_metric='valid_loss',
+              #scheduler_metric='valid_loss',
               max_iters=-1,
               verbose=True):
         for folder_name in [model_dir, result_dir]:
             if folder_name is not None and not os.path.exists(folder_name):
                 os.makedirs(folder_name)
         f_mode = 'w' if not resume else 'a'
+        f = None
         if result_dir is not None:
             f = open("%s/results.txt" % result_dir, f_mode)
-        else:
-            f = None
+        scheduler = None
+        if scheduler_fn is not None:
+            scheduler = {}
+            scheduler['g'] = scheduler_fn(self.optim_g, **scheduler_args)
+            scheduler['d_a'] = scheduler_fn(self.optim_d_a, **scheduler_args)
+            scheduler['d_b'] = scheduler_fn(self.optim_d_b, **scheduler_args)
         for epoch in range(epochs):
             # Training
             epoch_start_time = time.time()
@@ -243,31 +292,38 @@ class CycleGAN():
                     train_dict[this_key].append(losses[key])
                 pbar.update(1)
                 pbar.set_postfix(self._get_postfix(train_dict, 'train'))
+                # Process handlers.
                 for handler_fn in self.handlers:
                     handler_fn(losses, (A_real, B_real), outputs,
-                               {'epoch':epoch, 'iter':b, 'mode':'train'})
+                               {'epoch':epoch+1, 'iter':b+1, 'mode':'train'})
+            if verbose:
+                pbar.close()
             # Validation
-            if verbose:
-                pbar.close()
-                n_iters = min(len(itr_a_valid), len(itr_b_valid))
-                pbar = tqdm(total=n_iters)
-            valid_dict = OrderedDict({})
-            for b, (A_real, B_real) in enumerate(
-                    self._zip(itr_a_valid, itr_b_valid)):
-                A_real, B_real = self.prepare_batch(A_real, B_real)
-                losses, outputs = self.eval_on_instance(A_real, B_real)
-                for key in losses:
-                    this_key = 'valid_%s' % key
-                    if this_key not in valid_dict:
-                        valid_dict[this_key] = []
-                    valid_dict[this_key].append(losses[key])
-                pbar.update(1)
-                pbar.set_postfix(self._get_postfix(valid_dict, 'valid'))
-                for handler_fn in self.handlers:
-                    handler_fn(losses, (A_real, B_real), outputs,
-                               {'epoch':epoch, 'iter':b, 'mode':'valid'})
-            if verbose:
-                pbar.close()
+            valid_dict = {}
+            if itr_a_valid is not None and itr_b_valid is not None:
+                if verbose:
+                    n_iters = min(len(itr_a_valid), len(itr_b_valid))
+                    pbar = tqdm(total=n_iters)
+                for b, (A_real, B_real) in enumerate(
+                        self._zip(itr_a_valid, itr_b_valid)):
+                    A_real, B_real = self.prepare_batch(A_real, B_real)
+                    losses, outputs = self.eval_on_instance(A_real, B_real)
+                    for key in losses:
+                        this_key = 'valid_%s' % key
+                        if this_key not in valid_dict:
+                            valid_dict[this_key] = []
+                        valid_dict[this_key].append(losses[key])
+                    pbar.update(1)
+                    pbar.set_postfix(self._get_postfix(valid_dict, 'valid'))
+                    for handler_fn in self.handlers:
+                        handler_fn(losses, (A_real, B_real), outputs,
+                                   {'epoch':epoch+1, 'iter':b+1, 'mode':'valid'})
+                if verbose:
+                    pbar.close()
+            # Step learning rates.
+            if scheduler is not None:
+                for key in scheduler:
+                    scheduler[key].step()
             all_dict = train_dict
             all_dict.update(valid_dict)
             for key in all_dict:
@@ -283,7 +339,7 @@ class CycleGAN():
             str_ = ",".join([str(all_dict[key]) for key in all_dict])
             print(str_)
             if f is not None:
-                if epoch == 0 and not resume:
+                if (epoch+1) == 1 and not resume:
                     # If we're not resuming, then write the header.
                     f.write(",".join(all_dict.keys()) + "\n")
                 f.write(str_ + "\n")
