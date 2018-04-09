@@ -40,6 +40,8 @@ class CycleGAN():
                  dnorm=None,
                  pool_size=50,
                  handlers=[],
+                 scheduler_fn=None,
+                 scheduler_args={},
                  use_cuda='detect'):
         assert use_cuda in [True, False, 'detect']
         if use_cuda == 'detect':
@@ -51,13 +53,23 @@ class CycleGAN():
         self.g_btoa = gen_btoa_fn
         self.d_a = disc_a_fn
         self.d_b = disc_b_fn
-        self.optim_g = opt_g(
+        optim_g = opt_g(
             itertools.chain(
                 self.g_atob.parameters(),
                 self.g_btoa.parameters()),
             **opt_g_args)
-        self.optim_d_a = opt_d(self.d_a.parameters(), **opt_d_args)
-        self.optim_d_b = opt_d(self.d_b.parameters(), **opt_d_args)
+        optim_d_a = opt_d(self.d_a.parameters(), **opt_d_args)
+        optim_d_b = opt_d(self.d_b.parameters(), **opt_d_args)
+        self.optim = {
+            'g': optim_g,
+            'd_a': optim_d_a,
+            'd_b': optim_d_b
+        }
+        self.scheduler = {}
+        if scheduler_fn is not None:
+            for key in self.optim:
+                self.scheduler[key] = scheduler_fn(
+                    self.optim[key], **scheduler_args)
         self.handlers = handlers
         self.use_cuda = use_cuda
         self.fake_A_pool = util.ImagePool(pool_size)
@@ -103,7 +115,6 @@ class CycleGAN():
         return d_a_loss, d_b_loss
 
     def compute_d_norms(self, atob, btoa):
-        '''
         fake_a = self.fake_A_pool.query(btoa)
         fake_b = self.fake_B_pool.query(atob)
         fake_a = Variable(fake_a.data, requires_grad=True)
@@ -132,9 +143,7 @@ class CycleGAN():
             gp_b = ((gradients_db.view(gradients_db.size()[0], -1).norm(2, 1) - 1) ** 2).mean()
         else:
             gp_a, gp_b = None, None
-        return gp_a, 0
-        '''
-        raise NotImplementedError("TODO")
+        return gp_a, gp_b
 
     def _zip(self, A, B):
         if sys.version[0] == '2':
@@ -170,7 +179,7 @@ class CycleGAN():
         atob_gen_loss, cycle_aba, cycle_id_a = self.compute_g_losses_aba(
             A_real, atob, atob_btoa)
         g_tot_loss = atob_gen_loss + self.lamb*cycle_aba + self.beta*cycle_id_a
-        self.optim_g.zero_grad()
+        self.optim['g'].zero_grad()
         g_tot_loss.backward()
         btoa = self.g_btoa(B_real)
         btoa_atob = self.g_atob(btoa)
@@ -179,17 +188,17 @@ class CycleGAN():
         g_tot_loss = btoa_gen_loss + self.lamb*cycle_bab + self.beta*cycle_id_b
         g_tot_loss.backward()
         d_a_loss, d_b_loss = self.compute_d_losses(A_real, atob, B_real, btoa)
-        self.optim_d_a.zero_grad()
-        self.optim_d_b.zero_grad()
+        self.optim['d_a'].zero_grad()
+        self.optim['d_b'].zero_grad()
         d_a_loss.backward()
         d_b_loss.backward()
-        if self.dnorm > 0.:
+        if self.dnorm is not None and self.dnorm > 0.:
             gp_a, gp_b = self.compute_d_norms(atob, btoa)
-            (gp_a*self.dnorm).backward()
-            (gp_b*self.dnorm).backward()
-        self.optim_g.step()
-        self.optim_d_a.step()
-        self.optim_d_b.step()
+            (gp_a*self.dnorm).backward(retain_graph=True)
+            (gp_b*self.dnorm).backward(retain_graph=True)
+        self.optim['g'].step()
+        self.optim['d_a'].step()
+        self.optim['d_b'].step()
         losses = {
             'atob_gen': atob_gen_loss.item(),
             'cycle_aba': cycle_aba.item(),
@@ -200,6 +209,9 @@ class CycleGAN():
             'd_a': d_a_loss.item(),
             'd_b': d_b_loss.item()
         }
+        if self.dnorm is not None and self.dnorm > 0.:
+            losses['gp_a'] = gp_a.item()
+            losses['gp_b'] = gp_b.item()
         outputs = {
             'atob': atob.detach(),
             'atob_btoa': atob_btoa.detach(),
@@ -242,7 +254,7 @@ class CycleGAN():
 
     def _get_postfix(self, dict_stats, mode):
         """Create a postfix string for progress bar"""
-        allowed_keys = ['atob_gen', 'btoa_gen', 'd_a', 'd_b']
+        allowed_keys = ['atob_gen', 'btoa_gen', 'd_a', 'd_b', 'gp_a', 'gp_b']
         allowed_keys = ['%s_%s' % (mode,key) for key in allowed_keys]
         stats = OrderedDict({})
         for key in dict_stats.keys():
@@ -268,12 +280,6 @@ class CycleGAN():
         f = None
         if result_dir is not None:
             f = open("%s/results.txt" % result_dir, f_mode)
-        scheduler = None
-        if scheduler_fn is not None:
-            scheduler = {}
-            scheduler['g'] = scheduler_fn(self.optim_g, **scheduler_args)
-            scheduler['d_a'] = scheduler_fn(self.optim_d_a, **scheduler_args)
-            scheduler['d_b'] = scheduler_fn(self.optim_d_b, **scheduler_args)
         for epoch in range(epochs):
             # Training
             epoch_start_time = time.time()
@@ -321,19 +327,15 @@ class CycleGAN():
                 if verbose:
                     pbar.close()
             # Step learning rates.
-            if scheduler is not None:
-                for key in scheduler:
-                    scheduler[key].step()
+            for key in self.scheduler:
+                self.scheduler[key].step()
             all_dict = train_dict
             all_dict.update(valid_dict)
             for key in all_dict:
                 all_dict[key] = np.mean(all_dict[key])
-            all_dict['lr_g'] = \
-                self.optim_g.state_dict()['param_groups'][0]['lr']
-            all_dict['lr_da'] = \
-                self.optim_d_a.state_dict()['param_groups'][0]['lr']
-            all_dict['lr_db'] = \
-                self.optim_d_b.state_dict()['param_groups'][0]['lr']
+            for key in self.optim:
+                all_dict["lr_%s" % key] = \
+                    self.optim[key].state_dict()['param_groups'][0]['lr']
             all_dict['time'] = \
                 time.time() - epoch_start_time
             str_ = ",".join([str(all_dict[key]) for key in all_dict])
