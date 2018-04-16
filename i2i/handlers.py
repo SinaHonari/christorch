@@ -3,12 +3,17 @@ from skimage.io import imsave
 from skimage.transform import rescale, resize
 from .. import util
 
-def dump_visualisation(out_folder, scale_factor=1.):
+def dump_visualisation(out_folder, save_every_iter=None, scale_factor=1.):
     """
     """
     def _fn(losses, inputs, outputs, kwargs):
-        if kwargs['iter'] != 1:
-            return
+        iter_n = kwargs['iter'] - 1
+        if save_every_iter is not None:
+            if iter_n % save_every_iter != 0:
+                return
+        else:
+            if iter_n != 0:
+                return
         A_real = inputs[0].data.cpu().numpy()
         B_real = inputs[1].data.cpu().numpy()
         atob, atob_btoa, btoa, btoa_atob = \
@@ -20,17 +25,10 @@ def dump_visualisation(out_folder, scale_factor=1.):
         grid = np.zeros((h*bs, w*6, 3))
         for j in range(bs):
             for i in range(6):
-                # If n_channels >= 3, then get the first three channels.
-                # If n_channels < 3, then get the first channel.
                 this_img = outs_np[i][j]
-                if this_img.shape[0] >= 3:
-                    this_img = this_img[0:3]
-                    is_gray = False
-                else:
-                    this_img = this_img[0:1]
-                    is_gray = True
+                this_img = outs_np[i][j]
                 img_to_write = util.convert_to_rgb(this_img,
-                                                   is_grayscale=is_gray)
+                                                   is_grayscale=False)
                 grid[j*h:(j+1)*h, i*w:(i+1)*w, :] = img_to_write
         imsave(arr=rescale(grid, scale=scale_factor),
                fname="%s/%s_%i_%i.png" % (out_folder,
