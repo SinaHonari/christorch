@@ -56,9 +56,17 @@ class GAN:
             stats[key] = np.mean(dict_[key])
         return stats
 
-    def sample_z(self, bs):
+    def sample_z(self, bs, seed=None):
         """Return a sample z ~ p(z)"""
-        z = torch.rand(bs, self.z_dim)
+        if seed is not None:
+            rnd_state = np.random.RandomState(seed)
+            z = torch.from_numpy(
+                rnd_state.normal(0, 1, size=(bs, self.z_dim))
+            ).float()
+        else:
+            z = torch.from_numpy(
+                np.random.normal(0, 1, size=(bs, self.z_dim))
+            ).float()
         if self.use_cuda:
             z = z.cuda()
         z = Variable(z)
@@ -106,13 +114,26 @@ class GAN:
         }
         return losses, outputs
 
-    def sample(self, bs):
+    def sample(self, bs, seed=None):
         """Return a sample G(z)"""
         self._eval()
         with torch.no_grad():
-            z_batch = self.sample_z(bs)
+            z_batch = self.sample_z(bs, seed=seed)
             gz = self.g(z_batch)
         return gz
+
+    def visualise(self, gz_batch, out_file):
+        """Save samples g(z) to disk"""
+        h, w = gz_batch.shape[-2], gz_batch.shape[-1]
+        vis_dim = int(np.floor(np.sqrt(gz_batch.shape[0])))
+        vis = np.zeros((vis_dim*h, vis_dim*w, 3))
+        c = 0
+        for i in range(vis_dim):
+            for j in range(vis_dim):
+                vis[i*h:(i+1)*h, j*w:(j+1)*w, :] = util.convert_to_rgb(
+                    gz_batch[c])
+                c += 1
+        imsave(arr=vis, fname=out_file)
     
     def prepare_batch(self, X_batch):
         X_batch = X_batch.float()
@@ -182,19 +203,28 @@ class GAN:
                 f.flush()
             if (epoch+1) % save_every == 0 and model_dir is not None:
                 self.save(filename="%s/%i.pkl" % (model_dir, epoch+1))
-            # Save some visualisations.
-            gz_batch = self.sample(itr.batch_size).data.cpu().numpy() # (bs,f,h,w)
-            h, w = gz_batch.shape[-2], gz_batch.shape[-1]
+            # Save some visualisations. We fix the z for this one
+            # so we can monitor the evolution over several epochs.
             bs = itr.batch_size
-            vis_dim = int(np.floor(np.sqrt(bs)))
-            vis = np.zeros((vis_dim*h, vis_dim*w, 3))
-            c = 0
-            for i in range(vis_dim):
-                for j in range(vis_dim):
-                    vis[i*h:(i+1)*h, j*w:(j+1)*w, :] = util.convert_to_rgb(
-                        gz_batch[c])
-                    c += 1
-            imsave(arr=vis, fname="%i.png" % epoch)
+            gz_batch = self.sample(bs, seed=42).data.cpu().numpy()
+            self.visualise(gz_batch,
+                           out_file="%s/samplef_%i.png" % (result_dir, epoch+1))
             
         if f is not None:
             f.close()
+
+    def save(self, filename):
+        torch.save(
+            (self.g.state_dict(),
+             self.d.state_dict()),
+            filename)
+
+    def load(self, filename):
+        if not self.use_cuda:
+            map_location = lambda storage, loc: storage
+        else:
+            map_location = None
+        g, d = torch.load(filename,
+                          map_location=map_location)
+        self.g.load_state_dict(g)
+        self.d.load_state_dict(d)
