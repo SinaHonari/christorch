@@ -118,37 +118,32 @@ class CycleGAN(BaseModel):
                         self.mse(d_b_fake, 0))
         return d_a_loss, d_b_loss
 
-    def compute_d_norms(self, atob, btoa):
-        fake_a = self.fake_A_pool.query(btoa)
-        fake_b = self.fake_B_pool.query(atob)
-        fake_a = Variable(fake_a.data, requires_grad=True)
-        fake_b = Variable(fake_b.data, requires_grad=True)
-        d_a_fake = self.d_a(fake_a)
-        d_b_fake = self.d_b(fake_b)
-        if self.dnorm > 0:
-            this_ones_dafake = torch.ones(d_a_fake.size())
-            this_ones_dbfake = torch.ones(d_b_fake.size())
-            if self.use_cuda:
-                this_ones_dafake = this_ones_dafake.cuda()
-                this_ones_dbfake = this_ones_dbfake.cuda()
-            gradients_da = grad(outputs=d_a_fake,
-                                inputs=fake_a,
-                                grad_outputs=this_ones_dafake,
-                                create_graph=True,
-                                retain_graph=True,
-                                only_inputs=True)[0]
-            gradients_db = grad(outputs=d_b_fake,
-                                inputs=fake_b,
-                                grad_outputs=this_ones_dbfake,
-                                create_graph=True,
-                                retain_graph=True,
-                                only_inputs=True)[0]
-            gp_a = ((gradients_da.view(gradients_da.size()[0], -1).norm(2, 1) - 1) ** 2).mean()
-            gp_b = ((gradients_db.view(gradients_db.size()[0], -1).norm(2, 1) - 1) ** 2).mean()
-        else:
-            gp_a, gp_b = None, None
+    def compute_d_norms(self, A_real_, B_real_):
+        A_real = Variable(A_real_.data, requires_grad=True)
+        B_real = Variable(B_real_.data, requires_grad=True)
+        d_a_real = self.d_a(A_real)
+        d_b_real = self.d_b(B_real)
+        this_ones_dafake = torch.ones(d_a_real.size())
+        this_ones_dbfake = torch.ones(d_b_real.size())
+        if self.use_cuda:
+            this_ones_dafake = this_ones_dafake.cuda()
+            this_ones_dbfake = this_ones_dbfake.cuda()
+        gradients_da = grad(outputs=d_a_real,
+                            inputs=A_real,
+                            grad_outputs=this_ones_dafake,
+                            create_graph=True,
+                            retain_graph=True,
+                            only_inputs=True)[0]
+        gradients_db = grad(outputs=d_b_real,
+                            inputs=B_real,
+                            grad_outputs=this_ones_dbfake,
+                            create_graph=True,
+                            retain_graph=True,
+                            only_inputs=True)[0]
+        gp_a = ((gradients_da.view(gradients_da.size()[0], -1).norm(2, 1) - 1) ** 2).mean()
+        gp_b = ((gradients_db.view(gradients_db.size()[0], -1).norm(2, 1) - 1) ** 2).mean()
         return gp_a, gp_b
-
+    
     def _train(self):
         self.g_atob.train()
         self.g_btoa.train()
@@ -183,7 +178,7 @@ class CycleGAN(BaseModel):
         d_a_loss.backward()
         d_b_loss.backward()
         if self.dnorm is not None and self.dnorm > 0.:
-            gp_a, gp_b = self.compute_d_norms(atob, btoa)
+            gp_a, gp_b = self.compute_d_norms(A_real, B_real)
             (gp_a*self.dnorm).backward(retain_graph=True)
             (gp_b*self.dnorm).backward(retain_graph=True)
         self.optim['g'].step()
