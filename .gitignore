@@ -2,3 +2,12 @@
 *.py~
 *.py#
 *.pyc
+*.out
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gz
+*.zip
+*.tar*
+*.sh

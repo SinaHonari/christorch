@@ -1,9 +1,11 @@
+from __future__ import print_function
+
 import torch
+import os
 import numpy as np
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
-from torch.utils.data import DataLoader
-
+from torch.utils.data import DataLoader, Dataset
 
 """
 Code borrowed from Pedro Costa's vess2ret repo:
@@ -25,16 +27,6 @@ def convert_to_rgb(img, is_grayscale=False):
         imgp = imgp * 127.5 + 127.5
         imgp /= 255.
     return np.clip(imgp.transpose((1, 2, 0)), 0, 1)
-
-def _get_slices(length, bs):
-    slices = []
-    b = 0
-    while True:
-        if b*bs >= length:
-            break
-        slices.append( slice(b*bs, (b+1)*bs) )
-        b += 1
-    return slices
 
 def rnd_crop(img, data_format='channels_last'):
     assert data_format in ['channels_first', 'channels_last']
@@ -79,104 +71,15 @@ def min_max(img):
 
 def zmuv(img):
     img2 = np.copy(img)
-    print np.min(img2), np.max(img2)
     for i in range(0, img2.shape[0]):
-        print np.std(img2[i,...])
         img2[i, ...] = (img2[i, ...] - np.mean(img2[i, ...])) / np.std(img2[i,...]) # zmuv
-    print np.min(img2), np.max(img2)
+    #print np.min(img2), np.max(img2)
     return img2
 
 def swap_axes(img):
     img2 = np.copy(img)
     img2 = img2.swapaxes(3,2).swapaxes(2,1)
     return img2
-
-class ClassifierIterator():
-    """
-    H5 friendly iterator.
-    Constructs slices [0..bs], [bs, bs*2], [bs*2, bs*3], ... and shuffles
-    these at each epoch. That way the elements of the minibatch are still
-    ordered w.r.t. to the entire h5 file.
-    Features:
-    - Allows one to convert the dataset into a binary classification
-    - Deal with channels_last or channels_first inputs
-    - Use in conjunction with Keras image data generator
-    - Allows random crops
-    """
-    def __init__(self, X_arr, y_arr, bs, rnd_state=None, imgen=None, crop=None, mode='old', binary_idxs=None, data_format='channels_first'):
-        """
-        X_arr: a 4D h5 tensor
-        y_arr: a 1d h5 list
-        bs: batch size
-        rnd_state:
-        imgen: a Keras image data generator
-        crop: height/width (in px) of random crops
-        mode: TODO
-        binary_idxs: only consider two classes (if there are > 2) and convert these to binary (0,1).
-        """
-        assert mode in ['old', 'new']
-        assert data_format in ['channels_first', 'channels_last']
-        self.data_format = data_format
-        self.X_arr, self.y_arr, self.bs, self.rnd_state, self.imgen, self.crop, self.mode = \
-            X_arr, y_arr, bs, rnd_state, imgen, crop, mode
-        if binary_idxs == None:
-            self.slices = _get_slices(X_arr.shape[0], bs)
-            self.selected_idxs = None
-            self.N = X_arr.shape[0]
-        else:
-            assert len(binary_idxs) == 2
-            self.selected_idxs = np.where( np.in1d(y_arr[:], binary_idxs) )[0].tolist()
-            self.slices = _get_slices( len(self.selected_idxs), bs)
-            self.binary_idxs = binary_idxs
-            self.N = len(self.selected_idxs)
-        self.fn = self._fn()
-    def _fn(self):
-        while True:
-            if self.rnd_state != None:
-                self.rnd_state.shuffle(self.slices)
-            for elem in self.slices:
-                if self.selected_idxs == None:
-                    this_X, this_y = self.X_arr[elem], self.y_arr[elem]
-                else:
-                    this_X, this_y = self.X_arr[ self.selected_idxs[elem] ], self.y_arr[ self.selected_idxs[elem] ]
-                    this_y[ this_y == self.binary_idxs[0] ] = 0
-                    this_y[ this_y == self.binary_idxs[1] ] = 1
-                if self.mode == 'old':
-                    # why does this work and the new version doesn't??
-                    images_for_this_X = [ self._augment_image(img, self.imgen, self.crop) for img in this_X ]
-                    images_for_this_X = np.asarray(images_for_this_X, dtype="float32")
-                else:
-                    # TODO: why does this refactored version not work????
-                    # if i use this version and run my experiment, the qwk never goes >0.001...
-                    assert self.crop == None
-                    seed = self.rnd_state.randint(0, 100000)
-                    # this imgen flow thing???
-                    images_for_this_X = self.imgen.flow(this_X, None, batch_size=self.bs, seed=seed, shuffle=False).next()
-                if self.data_format == 'channels_first':
-                    yield images_for_this_X, this_y
-                else:
-                    yield images_for_this_X.swapaxes(3,2).swapaxes(2,1), this_y
-    def __iter__(self):
-        return self
-    def next(self):
-        return self.fn.next()
-    def _augment_image(self, img, imgen=None, crop=None):
-        img_size = img.shape[-1]
-        aug_x = img
-        if imgen != None:
-            aug_x = imgen.flow( np.asarray([aug_x], dtype=img.dtype), None).next()[0]
-        if crop != None:
-            x_start = np.random.randint(0, img_size-crop+1)
-            y_start = np.random.randint(0, img_size-crop+1)
-            aug_x = aug_x[:, y_start:y_start+crop, x_start:x_start+crop]
-        return aug_x    
-
-
-def test_image_folder(batch_size):
-    loader = ImageFolder("/data/lisa/data/beckhamc/dr-data/train_sample")
-    train_loader = DataLoader(
-        loader, batch_size=batch_size, shuffle=True, num_workers=-1)
-    return train_loader
 
 def int_to_ord(labels, num_classes):
     """
@@ -189,15 +92,193 @@ def int_to_ord(labels, num_classes):
         ords[i][0:labels[i]] *= 0.
     return ords
 
-if __name__ == '__main__':
-    #scale = transforms.Scale(255)
-    #loader = test_image_folder(2)
-    #for data in loader:
-    #    aa,bb = data
+def count_params(module, trainable_only=True):
+    """
+    Count the number of parameters in a module.
+    """
+    parameters = module.parameters()
+    if trainable_only:
+        parameters = filter(lambda p: p.requires_grad, parameters)
+    num = sum([np.prod(p.size()) for p in parameters])
+    return num
 
-    labels = np.asarray([0,1,2,3,4])
-    tmp = int_to_ord(labels, 5)
-    
-    
-    import pdb
-    pdb.set_trace()
+def get_gpu_mem_used():
+    try:
+        from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo
+        nvmlInit()
+        handle = nvmlDeviceGetHandleByIndex(0)
+        totalMemory = nvmlDeviceGetMemoryInfo(handle)
+        return totalMemory.used
+    except Exception:
+        return -1
+
+####################################################################
+
+def test_image_folder(batch_size):
+    import torchvision.transforms as transforms
+    # loads images in [0,1] initially
+    loader = ImageFolder(root="/data/lisa/data/beckhamc/dr-data/train_sample",
+                         transform=transforms.Compose([
+                             transforms.Scale(256),
+                             transforms.CenterCrop(256),
+                             transforms.ToTensor(),
+                             transforms.Lambda(lambda img: (img-0.5)/0.5)
+                         ])
+    )
+    train_loader = DataLoader(
+        loader, batch_size=batch_size, shuffle=True, num_workers=1)
+    return train_loader
+
+import torch.utils.data.dataset as dataset
+
+class NumpyDataset(dataset.Dataset):
+    def __init__(self, X, ys, keras_imgen=None, rnd_state=np.random.RandomState(0), reorder_channels=False):
+        """
+        keras_preprocessor: cannot use torchvision PIL transforms, so just use Keras' shit here.
+        reorder_channels: in the event that X is in the form (bs, h, w, f), if this flag is set to
+          True, we will reshape the x batches so that they are in the form (bs, f, h, w). Note that
+          if this is required, you should make sure that the Keras data augmentor knows to use
+          channels_last (TF-style tensors) rather than channels_first.
+        """
+        self.X = X
+        if ys != None:
+            # => we're dealing with classifier iterator
+            if type(ys) != list:
+                ys = [ys]
+            for y in ys:
+                assert len(y) == len(X)
+        else:
+            pass
+        self.ys = ys
+        self.N = len(X)
+        self.keras_imgen = keras_imgen
+        self.rnd_state = rnd_state
+        self.reorder_channels = reorder_channels
+    def __getitem__(self, index):
+        xx = self.X[index]
+        if self.ys != None:
+            yy = []
+            for y in self.ys:
+                yy.append(y[index])
+            yy = np.asarray(yy)
+        if self.keras_imgen != None:
+            seed = self.rnd_state.randint(0, 100000)
+            xx = self.keras_imgen.flow(xx[np.newaxis], None, batch_size=1, seed=seed, shuffle=False).next()[0]
+        if self.reorder_channels:
+            xx = xx.swapaxes(2,1).swapaxes(1,0)
+        if self.ys != None:
+            return xx, yy
+        else:
+            return xx
+    def __len__(self):
+        return self.N
+
+from PIL import Image
+
+class DatasetFromFolder(Dataset):
+    """
+    Specify specific folders to load images from.
+
+    Notes
+    -----
+    Courtesy of:
+    https://github.com/togheppi/CycleGAN/blob/master/dataset.py
+    With some extra modifications done by me.
+    """
+    def __init__(self, image_dir, images=None, transform=None,
+                 append_label=None, bit16=False):
+        """
+        Parameters
+        ----------
+        image_dir: directory where the images are located
+        images: a list of images you want instead. If set to `None` it gets all
+          images in the directory specified by `image_dir`.
+        transform:
+        fliplr: enable left/right flip augmentation?
+        append_label: if an int is provided, then `__getitem__` will return
+          not just the image x, but (x,y), where y denotes the label. This
+          means that this iterator could also be used for classifiers.
+        """
+        super(DatasetFromFolder, self).__init__()
+        self.input_path = image_dir
+        if images is None:
+            self.image_filenames = [x for x in
+                                    sorted(os.listdir(self.input_path))]
+        else:
+            if type(images) != set:
+                images = set(images)
+            self.image_filenames = [os.path.join(image_dir, fname)
+                                    for fname in images]
+        self.transform = transform
+        self.append_label = append_label
+        self.bit16 = bit16
+    def __getitem__(self, index):
+        # Load Image
+        img_fn = os.path.join(self.input_path,
+                              self.image_filenames[index])
+        if self.bit16:
+            from skimage.io import imread
+            img = imread(img_fn)
+            img = img.astype("float32") / 65535.
+            img = (img*255.).astype("uint8")
+            img = Image.fromarray(img)
+        else:
+            img = Image.open(img_fn).convert('RGB')
+        if self.transform is not None:
+            img = self.transform(img)
+        if self.append_label is not None:
+            yy = np.asarray([self.append_label])
+            return img, yy
+        else:
+            return img
+    def __len__(self):
+        return len(self.image_filenames)
+
+class ImagePool():
+    """
+    Used to implement a replay buffer for CycleGAN.
+
+    Notes
+    -----
+    Original code:
+    https://github.com/togheppi/CycleGAN/blob/master/utils.py
+    Unlike the original implementation, the buffer's images
+      are stored on the CPU, not the GPU. I am not sure whether
+      this is really worth the effort -- you'd be doing a bit of
+      back and forth copying to/fro the GPU which could really
+      slow down the training loop I suspect.
+    """
+    def __init__(self, pool_size):
+        """
+        use_cuda: if `True`, store the buffer on GPU. This is
+          not recommended for large models!!!
+        """
+        self.pool_size = pool_size
+        if self.pool_size > 0:
+            self.num_imgs = 0
+            self.images = [] # stored on cpu, NOT gpu
+
+    def query(self, images):
+        from torch.autograd import Variable
+        if self.pool_size == 0:
+            return images.detach()
+        return_images = []
+        for image in images.data:
+            image = torch.unsqueeze(image, 0)
+            if self.num_imgs < self.pool_size:
+                self.num_imgs = self.num_imgs + 1
+                self.images.append(image.cpu())
+                return_images.append(image)
+            else:
+                p = np.random.uniform(0, 1)
+                if p > 0.5:
+                    random_id = np.random.randint(0, self.pool_size-1)
+                    tmp = self.images[random_id].clone()
+                    self.images[random_id] = image.cpu()
+                    # since tmp is on cpu, cuda it when
+                    # we append it to return images
+                    return_images.append(tmp.cuda())
+                else:
+                    return_images.append(image)
+        return_images = torch.cat(return_images, 0)
+        return Variable(return_images)
