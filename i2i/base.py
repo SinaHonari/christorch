@@ -15,10 +15,10 @@ class BaseModel():
     def save(self, args, **kwargs):
         raise NotImplementedError()
    
-    def train_on_instance(self, x, y):
+    def train_on_instance(self, x, y, **kwargs):
         raise NotImplementedError()
 
-    def eval_on_instance(self, x, y):
+    def eval_on_instance(self, x, y, **kwargs):
         raise NotImplementedError()
 
     def num_parameters(self, net):
@@ -67,7 +67,8 @@ class BaseModel():
             for b, (A_real, B_real) in enumerate(
                     self._zip(itr_a_train, itr_b_train)):
                 A_real, B_real = self.prepare_batch(A_real, B_real)
-                losses, outputs = self.train_on_instance(A_real, B_real)
+                losses, outputs = self.train_on_instance(A_real, B_real,
+                                                         iter=b+1)
                 for key in losses:
                     this_key = 'train_%s' % key
                     if this_key not in train_dict:
@@ -78,7 +79,7 @@ class BaseModel():
                 # Process handlers.
                 for handler_fn in self.handlers:
                     handler_fn(losses, (A_real, B_real), outputs,
-                               {'epoch':epoch+1, 'iter':b+1, 'mode':'train'})
+                               {'epoch': epoch+1, 'iter': b+1, 'mode': 'train'})
             if verbose:
                 pbar.close()
             # Validation
@@ -90,7 +91,8 @@ class BaseModel():
                 for b, (A_real, B_real) in enumerate(
                         self._zip(itr_a_valid, itr_b_valid)):
                     A_real, B_real = self.prepare_batch(A_real, B_real)
-                    losses, outputs = self.eval_on_instance(A_real, B_real)
+                    losses, outputs = self.eval_on_instance(A_real, B_real,
+                                                            iter=b+1)
                     for key in losses:
                         this_key = 'valid_%s' % key
                         if this_key not in valid_dict:

@@ -8,14 +8,9 @@ import torch.optim as optim
 from torch.autograd import Variable, grad
 # torchvision
 from collections import OrderedDict
-
 from tqdm import tqdm
 from .. import util
 import itertools
-
-from torch.nn.utils import clip_grad_norm
-
-import logging
 
 from .base import BaseModel
 
@@ -31,22 +26,27 @@ class CycleGAN(BaseModel):
         return g_summary + "\n" + d_summary
 
     def __init__(self,
-                 gen_atob_fn,
-                 disc_a_fn,
-                 gen_btoa_fn,
-                 disc_b_fn,
-                 opt_g=optim.Adam,
-                 opt_d=optim.Adam,
+                 gen_atob_fn, disc_a_fn,
+                 gen_btoa_fn, disc_b_fn,
+                 opt_g=optim.Adam, opt_d=optim.Adam,
                  opt_d_args={'lr':0.0002, 'betas':(0.5, 0.999)},
                  opt_g_args={'lr':0.0002, 'betas':(0.5, 0.999)},
-                 lamb=10.,
-                 beta=5.,
-                 dnorm=None,
+                 lamb=10., beta=5., dnorm=None,
                  pool_size=50,
                  handlers=[],
-                 scheduler_fn=None,
-                 scheduler_args={},
+                 scheduler_fn=None, scheduler_args={},
                  use_cuda='detect'):
+        """
+        gen_atob_fn: generator from A->B
+        disc_a_fn: discriminator on A
+        gen_btoa_fn: generator from B->A
+        disc_b_fn: discriminator on B
+        opt_g: opt class for generators
+        opt_d: opt class for discriminators
+        lamb: cycle consistency coefficient
+        beta: identity coefficient
+        dnorm: gradient penalty coefficient
+        """
         assert use_cuda in [True, False, 'detect']
         if use_cuda == 'detect':
             use_cuda = True if torch.cuda.is_available() else False
@@ -75,6 +75,7 @@ class CycleGAN(BaseModel):
                 self.scheduler[key] = scheduler_fn(
                     self.optim[key], **scheduler_args)
         self.handlers = handlers
+        self.train_g_every = 1
         self.use_cuda = use_cuda
         self.fake_A_pool = util.ImagePool(pool_size)
         self.fake_B_pool = util.ImagePool(pool_size)
@@ -156,7 +157,7 @@ class CycleGAN(BaseModel):
         self.d_a.eval()
         self.d_b.eval()
 
-    def train_on_instance(self, A_real, B_real):
+    def train_on_instance(self, A_real, B_real, **kwargs):
         """Train the network on a single example"""
         self._train()
         atob = self.g_atob(A_real)
@@ -177,11 +178,15 @@ class CycleGAN(BaseModel):
         self.optim['d_b'].zero_grad()
         d_a_loss.backward()
         d_b_loss.backward()
-        if self.dnorm is not None and self.dnorm > 0.:
+        # If dnorm==None, don't compute anything.
+        # If it's == 0, compute norm but don't add it to loss.
+        if self.dnorm is not None:
             gp_a, gp_b = self.compute_d_norms(A_real, B_real)
-            (gp_a*self.dnorm).backward(retain_graph=True)
-            (gp_b*self.dnorm).backward(retain_graph=True)
-        self.optim['g'].step()
+            if self.dnorm > 0.:
+                (gp_a*self.dnorm).backward(retain_graph=True)
+                (gp_b*self.dnorm).backward(retain_graph=True)
+        if (kwargs['iter']-1) % self.train_g_every == 0:
+            self.optim['g'].step()
         self.optim['d_a'].step()
         self.optim['d_b'].step()
         losses = {
@@ -194,7 +199,7 @@ class CycleGAN(BaseModel):
             'd_a': d_a_loss.item(),
             'd_b': d_b_loss.item()
         }
-        if self.dnorm is not None and self.dnorm > 0.:
+        if self.dnorm is not None:
             losses['gp_a'] = gp_a.item()
             losses['gp_b'] = gp_b.item()
         outputs = {
@@ -205,7 +210,7 @@ class CycleGAN(BaseModel):
         }
         return losses, outputs
 
-    def eval_on_instance(self, A_real, B_real):
+    def eval_on_instance(self, A_real, B_real, **kwargs):
         """Train the network on a single example"""
         self._eval()
         with torch.no_grad():
