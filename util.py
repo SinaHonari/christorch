@@ -141,7 +141,7 @@ class NumpyDataset(dataset.Dataset):
           channels_last (TF-style tensors) rather than channels_first.
         """
         self.X = X
-        if ys != None:
+        if ys is not None:
             # => we're dealing with classifier iterator
             if type(ys) != list:
                 ys = [ys]

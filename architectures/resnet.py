@@ -23,10 +23,10 @@ class ResNetCore(nn.Module):
       https://discuss.pytorch.org/t/why-torchvision-models-can-not-forward-the-input-which-has-size-of-larger-than-430-430/2067/7
     """
 
-    def __init__(self, block, layers):
+    def __init__(self, n_in, block, layers):
         self.inplanes = 64
         super(ResNetCore, self).__init__()
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
+        self.conv1 = nn.Conv2d(n_in, 64, kernel_size=7, stride=2, padding=3,
                                bias=False)
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = nn.ReLU(inplace=True)
@@ -85,16 +85,16 @@ class ResNetCore(nn.Module):
 ######################################
     
 class ResNet(nn.Module):
-    def __init__(self, in_shp, num_classes, kind='18'):
+    def __init__(self, n_in, num_classes, kind='18'):
         # in_shp is ignored
         super(ResNet, self).__init__()
-        self.features = get_resnet(kind)
-        self.classifier = nn.Linear(512 * self.features.block.expansion, num_classes)
-        self.keys = ['p1']
+        self.features = get_resnet(n_in, kind)
+        self.classifier = nn.Linear(512 * self.features.block.expansion,
+                                    num_classes)
     def forward(self, x):
         x = self.features(x)
         x = self.classifier(x)
-        return {'p1': F.log_softmax(x)}
+        return F.log_softmax(x)
 
 class ResNetTwoOutput(nn.Module):
     def __init__(self, in_shp, num_classes, kind='18'):
@@ -113,7 +113,7 @@ class ResNetTwoOutput(nn.Module):
 
 from . import extensions
 
-def get_resnet(kind):
+def get_resnet(n_in, kind):
     assert kind in ['18', '34', '50', '101', '152']
     layer_spec = {
         '18': (BasicBlock, [2,2,2,2]),
@@ -122,7 +122,7 @@ def get_resnet(kind):
         '101': (Bottleneck, [3,4,23,3]),
         '152': (Bottleneck, [3,8,36,3])
     }
-    return ResNetCore(block=layer_spec[kind][0], layers=layer_spec[kind][1])
+    return ResNetCore(n_in, block=layer_spec[kind][0], layers=layer_spec[kind][1])
 
 class BinomialResNet(nn.Module):
     def __init__(self, in_shp, num_classes, kind='18', learn_tau='none', extra_fc=False):
