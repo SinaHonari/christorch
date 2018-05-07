@@ -33,8 +33,10 @@ class GAN:
         self.dnorm = dnorm
         self.g = gen_fn
         self.d = disc_fn
-        optim_g = opt_g(self.g.parameters(), **opt_g_args)
-        optim_d = opt_d(self.d.parameters(), **opt_d_args)
+        optim_g = opt_g(filter(lambda p: p.requires_grad,
+                               self.g.parameters()), **opt_g_args)
+        optim_d = opt_d(filter(lambda p: p.requires_grad,
+                               self.d.parameters()), **opt_d_args)
         self.optim = {
             'g': optim_g,
             'd': optim_d,
@@ -49,6 +51,7 @@ class GAN:
         if self.use_cuda:
             self.g.cuda()
             self.d.cuda()
+        self.last_epoch = 0
 
     def _get_stats(self, dict_, mode):
         stats = OrderedDict({})
@@ -159,7 +162,7 @@ class GAN:
         f = None
         if result_dir is not None:
             f = open("%s/results.txt" % result_dir, f_mode)
-        for epoch in range(epochs):
+        for epoch in range(self.last_epoch, epochs):
             # Training
             epoch_start_time = time.time()
             if verbose:
@@ -168,7 +171,8 @@ class GAN:
             for b, X_batch in enumerate(itr):
                 X_batch = self.prepare_batch(X_batch)
                 Z_batch = self.sample_z(X_batch.size()[0])
-                losses, outputs = self.train_on_instance(Z_batch, X_batch)
+                losses, outputs = self.train_on_instance(Z_batch, X_batch,
+                                                         iter=b+1)
                 for key in losses:
                     this_key = 'train_%s' % key
                     if this_key not in train_dict:
@@ -180,6 +184,7 @@ class GAN:
                 for handler_fn in self.handlers:
                     handler_fn(losses, (Z_batch, X_batch), outputs,
                                {'epoch':epoch+1, 'iter':b+1, 'mode':'train'})
+                break
             if verbose:
                 pbar.close()
             # Step learning rates.
@@ -202,7 +207,8 @@ class GAN:
                 f.write(str_ + "\n")
                 f.flush()
             if (epoch+1) % save_every == 0 and model_dir is not None:
-                self.save(filename="%s/%i.pkl" % (model_dir, epoch+1))
+                self.save(filename="%s/%i.pkl" % (model_dir, epoch+1),
+                          epoch=epoch+1)
             # Save some visualisations. We fix the z for this one
             # so we can monitor the evolution over several epochs.
             bs = itr.batch_size
@@ -213,18 +219,37 @@ class GAN:
         if f is not None:
             f.close()
 
-    def save(self, filename):
-        torch.save(
-            (self.g.state_dict(),
-             self.d.state_dict()),
-            filename)
+    def save(self, filename, epoch, legacy=False):
+        if legacy:
+            torch.save(
+                (self.g.state_dict(),
+                 self.d.state_dict()),
+                filename)
+        else:
+            dd = {}
+            dd['g'] = self.g.state_dict()
+            dd['d'] = self.d.state_dict()
+            for key in self.optim:
+                dd['optim_' + key] = self.optim[key].state_dict()
+            dd['epoch'] = epoch
+            torch.save(dd, filename)
 
-    def load(self, filename):
+    def load(self, filename, legacy=False):
         if not self.use_cuda:
             map_location = lambda storage, loc: storage
         else:
             map_location = None
-        g, d = torch.load(filename,
-                          map_location=map_location)
-        self.g.load_state_dict(g)
-        self.d.load_state_dict(d)
+        if legacy:
+            g, d = torch.load(filename,
+                              map_location=map_location)
+            self.g.load_state_dict(g)
+            self.d.load_state_dict(d)
+        else:
+            dd = torch.load(filename,
+                            map_location=map_location)
+            self.g.load_state_dict(dd['g'])
+            self.d.load_state_dict(dd['d'])
+            for key in self.optim:
+                self.optim[key].load_state_dict(dd['optim_'+key])
+            self.last_epoch = dd['epoch']
+            
