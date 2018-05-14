@@ -184,7 +184,6 @@ class GAN:
                 for handler_fn in self.handlers:
                     handler_fn(losses, (Z_batch, X_batch), outputs,
                                {'epoch':epoch+1, 'iter':b+1, 'mode':'train'})
-                break
             if verbose:
                 pbar.close()
             # Step learning rates.
