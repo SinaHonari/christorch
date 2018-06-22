@@ -9,26 +9,22 @@ from torchvision import datasets, transforms
 from collections import OrderedDict
 import os
 import sys
-import math
 from tqdm import tqdm
-import h5py
-import util
+from . import util
     
 class Classifier():
-    def num_parameters(self):
-        return np.sum([ np.prod(np.asarray(elem.size())) for elem in self.l_out.parameters() ])
-    def __str__(self):
-        return str(self.l_out) + "\n# parameters:" + str(self.num_parameters())
+    #def num_parameters(self):
+    #    return np.sum([ np.prod(np.asarray(elem.size())) for elem in self.l_out.parameters() ])
+    #def __str__(self):
+    #    return str(self.l_out) + "\n# parameters:" + str(self.num_parameters())
     def __init__(self,
                  net_fn,
-                 net_fn_params,
-                 in_shp,
-                 num_classes,
-                 loss_name='x-ent',
                  opt=optim.Adam, opt_args={},
                  l2_decay=0.,
-                 metrics={}, hooks={},
-                 gpu_mode='detect',
+                 metrics={},
+                 hooks={},
+                 handlers=[],
+                 use_cuda='detect',
                  verbose=True):
         """
         loss_name: either 'x-ent' (cross-entropy), 'emd2' (squared earth
@@ -46,256 +42,154 @@ class Classifier():
           also be set to the string `autodetect`, which will automatically
           enable the mode if a GPU is detected.
         """
-        assert loss_name in ['x-ent', 'emd2', 'bce']
-        assert gpu_mode in [True, False, 'detect']
-        if gpu_mode == 'detect':
-            gpu_mode = True if torch.cuda.is_available() else False
-        self.in_shp = in_shp
-        self.num_classes = num_classes
-        self.loss_name = loss_name
+        assert use_cuda in [True, False, 'detect']
+        if use_cuda == 'detect':
+            use_cuda = True if torch.cuda.is_available() else False
         self.verbose = verbose
-        self.l_out = net_fn(in_shp, num_classes, **net_fn_params)
-        # l_out is the instantiated class
-        # l_out.forward(x) returns a dict of outputs...
-        # https://github.com/pytorch/pytorch/issues/1266
+        self.l_out = net_fn
         params = filter(lambda x: x.requires_grad, self.l_out.parameters())
         self.optim = opt(params, weight_decay=l2_decay, **opt_args)
         self.metrics = metrics
         self.hooks = hooks
-        self.gpu_mode = gpu_mode
-        if self.loss_name == 'emd2':
-            from architectures.extensions import CMF
-            self.l_pmf = CMF(self.num_classes)
-            if self.gpu_mode:
-                self.l_pmf.cuda()
-        elif self.loss_name == 'bce':
-            from architectures.extensions import CumulativeToDiscrete
-            self.l_ctd = CumulativeToDiscrete(self.num_classes-1)
-            if self.gpu_mode:
-                self.l_ctd.cuda()
-        if self.gpu_mode:
+        self.handlers = handlers
+        self.use_cuda = use_cuda
+        self.loss = nn.NLLLoss()
+        self.last_epoch = 0
+        if self.use_cuda:
             self.l_out.cuda()
-    def compute_loss(self, out, y_batch):
-        """
-        TODO: cross-entropy has a `weights` parameter which can be used
-        to ignore certain labels. This means if our y_batch consists of
-        ?? labels we can ignore them in the loss calculation...!
-        """
-        y_batch_orig = y_batch
-        if self.loss_name == 'x-ent':
-            #out = out_fn(X_batch)
-            pdist = torch.exp(out)
-            loss = nn.NLLLoss()(out, y_batch)
-        elif self.loss_name == 'emd2':
-            #out = out_fn(X_batch)
-            pdist = torch.exp(out)
-            # TODO: clean this up. maybe move the loss
-            # computation to another method
-            # create a one-hot y_batch as well
-            y_batch_onehot = np.zeros((len(y_batch), self.num_classes), dtype=y_batch_orig.dtype)
-            y_batch_onehot[ np.arange(0, len(y_batch)), y_batch_orig ] = 1.
-            y_batch_onehot = torch.from_numpy(y_batch_onehot).float()
-            if self.gpu_mode:
-                y_batch_onehot = y_batch_onehot.cuda()
-            y_batch_onehot = Variable(y_batch_onehot)
-            cmf_pdist = self.l_pmf(pdist)
-            cmf_y = self.l_pmf(y_batch_onehot)
-            # compute the squared L2 norm
-            loss = torch.mean(torch.sum((cmf_pdist-cmf_y)**2,dim=1))
-        elif self.loss_name == 'bce':
-            y_batch_cum = torch.from_numpy(util.int_to_ord(y_batch_orig, self.num_classes)).float()
-            if self.gpu_mode:
-                y_batch_cum = y_batch_cum.cuda()
-            y_batch_cum = Variable(y_batch_cum)
-            #out = out_fn(X_batch)
-            loss = nn.BCEWithLogitsLoss()(out, y_batch_cum)
-            pdist = self.l_ctd(torch.exp(out))   
-        return loss, pdist
-    def train(self,
-              itr_train, itr_valid,
-              epochs, model_dir, result_dir,
-              resume=False,
-              max_iters=None,
-              save_every=1,
-              scheduler=None,
-              scheduler_args={},
-              scheduler_metric='valid_loss',
-              verbose=True):
-        """
-        If a results directory is specified, this will:
-        - Save a CSV file (results.txt) with per-epoch statistics for training/validation.
-        - Save a CSV file (valid_preds.txt) with predicted prob. dists on the validation set.
+            self.loss.cuda()
 
-        ----------
-        Parameters
-        ----------
-        itr_train: iterator for training. It is assumed this loops infinitely, and has the two fields `N`
-          (total number of instances) and `bs` (batch size).
-        itr_valid: same as above, but for validatioh.
-        epochs: number of epochs
-        model_dir: directory for where model files should be stored
-        result_dir: directory for where results files should be stored
-        resume: if `True`, append to the results file rather than overwriting it
-        save_every: save models every this number of epochs
-        verbose:
-        max_iters: for debugging purposes. Set the maximum number of minibatches per epoch. -1 = don't use.
-        """
+    def prepare_batch(self, X_batch, y_batch):
+        X_batch = X_batch.float()
+        y_batch = y_batch.long()
+        if self.use_cuda:
+            X_batch = X_batch.cuda()
+            y_batch = y_batch.cuda()
+        return X_batch, y_batch
+
+    def train_on_instance(self, X_batch, y_batch, **kwargs):
+        self.optim.zero_grad()
+        out = self.l_out(X_batch)
+        with torch.no_grad():
+            acc = (out.argmax(dim=1) == y_batch).float().mean()
+        pdist = torch.exp(out)
+        loss = self.loss(out, y_batch)
+        loss.backward()
+        self.optim.step()
+        return {
+            'loss': loss.item(),
+            'acc': acc.item()
+        }, {'pdist': pdist}
+
+    def eval_on_instance(self, X_batch, y_batch, **kwargs):
+        with torch.no_grad():
+            out = self.l_out(X_batch)
+            acc = (out.argmax(dim=1) == y_batch).float().mean()
+            pdist = torch.exp(out)
+            loss = self.loss(out, y_batch)
+        return {
+            'loss': loss.item(),
+            'acc': acc.item()
+        }, {'pdist': pdist}
+
+    def _get_stats(self, dict_, mode):
+        dd = OrderedDict({})
+        for key in dict_:
+            if key != 'epoch':
+                dd[key] = np.mean(dict_[key])
+        return dd
+    
+    def train(self,
+              itr_train,
+              itr_valid,
+              epochs,
+              model_dir=None,
+              result_dir=None,
+              append=False,
+              save_every=1,
+              verbose=True):
         for folder_name in [model_dir, result_dir]:
             if folder_name is not None and not os.path.exists(folder_name):
                 os.makedirs(folder_name)
-        if scheduler != None:
-            scheduler = scheduler(self.optim, **scheduler_args)
-        else:
-            scheduler = None
-        f = open("%s/results.txt" % result_dir, "wb" if not resume else "a") if result_dir != None else None
-        start_time = time.time()
-        stats_keys = ['epoch', 'train_loss', 'valid_loss', 'lr', 'time']
-        for epoch in range(epochs):
-            stats = OrderedDict({})
-            for key in stats_keys:
-                stats[key] = None
-            for metric_key in self.metrics.keys():
-                for y_key in self.l_out.keys:
-                    stats["%s_%s_%s" % ('train', metric_key, y_key)] = None
-                    stats["%s_%s_%s" % ('valid', metric_key, y_key)] = None
-            stats['epoch'] = epoch+1
-            if (epoch+1) == 1:
-                # if this is the start of training, print out / save the header
-                if f != None and not resume:
-                    f.write(",".join(stats.keys()) + "\n")
-                print ",".join(stats.keys())                
+        f_mode = 'w' if not append else 'a'
+        f = None
+        if result_dir is not None:
+            f = open("%s/results.txt" % result_dir, f_mode)
+        for epoch in range(self.last_epoch, epochs):
+            # Training
             epoch_start_time = time.time()
-            tmp_stats = {'train_loss':[], 'valid_loss':[]}
-            for idx, itr in enumerate([itr_train, itr_valid]):
-                mode = 'train' if idx==0 else 'valid'
-                if mode == 'train':
-                    self.l_out.train()
-                else:
-                    self.l_out.eval()
-                buf = {}
-                for key in self.l_out.keys:
-                    buf[key] = {'ys':[], 'pdist':[]}
-                # the iterator is assumed to return data in the form
-                # (X_batch, y_batch_1, y_batch_2, ...)
-                pbar = tqdm(total=len(itr))
-                for b, (X_batch,y_packet) in enumerate(itr):
-                    pbar.update(1)
-                    self.optim.zero_grad()
-                    # if len(y_packet) == 1, we know it's simply one label set,
-                    # but if it is a matrix (where each line corresponds to a set of labels),
-                    # it should match the key signature
-                    if y_packet.size()[1] != len(self.l_out.keys):
-                        raise Exception("The number of ys returned by the iterator must match "
-                                        + "the number of outputs (keys) of the network!!!")
-                    #X_batch = torch.from_numpy(X_batch).float()
-                    X_batch = X_batch.float()
-                    if self.gpu_mode:
-                        X_batch = X_batch.cuda()
-                    X_batch = Variable(X_batch)
-                    outs = self.l_out(X_batch)
-                    tot_loss = 0.
-                    for y_idx, y_key in enumerate(self.l_out.keys):
-                        y_batch = y_packet[:,y_idx]
-                        for key in self.hooks.keys():
-                            self.hooks[key](X_batch, y_batch, epoch+1)
-                        #y_batch = torch.from_numpy(y_batch).long()
-                        y_batch = y_batch.long()
-                        if self.gpu_mode:
-                            y_batch = y_batch.cuda()
-                        y_batch = Variable(y_batch)
-                        this_loss, this_pdist = self.compute_loss(outs[y_key], y_batch)
-                        tot_loss += this_loss
-                        buf[y_key]['ys'] = np.hstack((buf[y_key]['ys'], y_batch.cpu().data.numpy()))
-                        if buf[y_key]['pdist'] == []:
-                            buf[y_key]['pdist'] = this_pdist.cpu().data.numpy()
-                        else:
-                            buf[y_key]['pdist'] = np.vstack((buf[y_key]['pdist'], this_pdist.cpu().data.numpy()))
-                    if mode == 'train':
-                        tot_loss.backward()
-                        self.optim.step()
-                    #########
-                    tmp_stats['%s_loss' % mode].append(tot_loss.data[0])
+            if verbose:
+                pbar = tqdm(total=len(itr_train))
+            train_dict = OrderedDict({'epoch': epoch+1})
+            for b, (X_batch, y_batch) in enumerate(itr_train):
+                X_batch, y_batch = self.prepare_batch(X_batch, y_batch)
+                losses, outputs = self.train_on_instance(X_batch, y_batch,
+                                                         iter=b+1)
+                for key in losses:
+                    this_key = 'train_%s' % key
+                    if this_key not in train_dict:
+                        train_dict[this_key] = []
+                    train_dict[this_key].append(losses[key])
+                pbar.update(1)
+                pbar.set_postfix(self._get_stats(train_dict, 'train'))
+                # Process handlers.
+                for handler_fn in self.handlers:
+                    handler_fn(losses, (X_batch, y_batch), outputs,
+                               {'epoch':epoch+1, 'iter':b+1, 'mode':'train'})
+            if verbose:
                 pbar.close()
-                for y_key in buf.keys():
-                    for key in self.metrics:
-                        stats["%s_%s_%s" % (mode, key, y_key)] = self.metrics[key](buf[y_key]['pdist'], buf[y_key]['ys'], self.num_classes)
-                #########
-                stats['%s_loss' % mode] = np.mean(tmp_stats['%s_loss' % mode])
-                #if mode == "valid" and (epoch+1) % save_every == 0:
-                #    preds_matrix = np.hstack((all_pdist, all_ys[np.newaxis].T))
-                #    np.savetxt("%s/%s_preds_%i.csv" % (result_dir, mode, epoch+1), preds_matrix, delimiter=",")
-            stats['lr'] = self.optim.state_dict()['param_groups'][0]['lr']
-            stats['time'] = time.time() - epoch_start_time
-            # update the learning rate scheduler, if applicable
-            if scheduler != None:
-                scheduler.step(stats[scheduler_metric])
-            str_ = ",".join([ str(stats[key]) for key in stats ])
-            print str_
-            if f != None:
+                pbar = tqdm(total=len(itr_valid))
+            # Validation.
+            valid_dict = {}
+            for b, (X_batch, y_batch) in enumerate(itr_valid):
+                X_batch, y_batch = self.prepare_batch(X_batch, y_batch)
+                losses, outputs = self.eval_on_instance(X_batch, y_batch,
+                                                         iter=b+1)
+                for key in losses:
+                    this_key = 'valid_%s' % key
+                    if this_key not in valid_dict:
+                        valid_dict[this_key] = []
+                    valid_dict[this_key].append(losses[key])
+                pbar.update(1)
+                pbar.set_postfix(self._get_stats(valid_dict, 'valid'))
+                # Process handlers.
+                for handler_fn in self.handlers:
+                    handler_fn(losses, (X_batch, y_batch), outputs,
+                               {'epoch':epoch+1, 'iter':b+1, 'mode':'valid'})
+            if verbose:
+                pbar.close()
+            # Step learning rates.
+            #for key in self.scheduler:
+            #    self.scheduler[key].step()
+            all_dict = train_dict
+            all_dict.update(valid_dict)
+            for key in all_dict:
+                all_dict[key] = np.mean(all_dict[key])
+            all_dict["lr_%s" % key] = \
+                self.optim.state_dict()['param_groups'][0]['lr']
+            all_dict['time'] = \
+                time.time() - epoch_start_time
+            str_ = ",".join([str(all_dict[key]) for key in all_dict])
+            print(str_)
+            if f is not None:
+                if (epoch+1) == 1 and not append:
+                    # If we're not resuming, then write the header.
+                    f.write(",".join(all_dict.keys()) + "\n")
                 f.write(str_ + "\n")
                 f.flush()
-            if self.gpu_mode and (epoch+1) == 1:
-                # when we're in the first epoch, print how much memory
-                # was used (allocated?) by the GPU
-                try:
-                    from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo
-                    nvmlInit()
-                    handle = nvmlDeviceGetHandleByIndex(0)
-                    totalMemory = nvmlDeviceGetMemoryInfo(handle)
-                    print "GPU memory used:", totalMemory.used / 1024. / 1024.
-                except Exception as e:
-                    print "Was unable to detect amount of GPU memory used"
-                    print e
-            if (epoch+1) % save_every == 0 and model_dir != None:
-                self.save( filename="%s/%i.pkl" % (model_dir, epoch+1) )
-        if f != None:
+            if (epoch+1) % save_every == 0 and model_dir is not None:
+                self.save(filename="%s/%i.pkl" % (model_dir, epoch+1),
+                          epoch=epoch+1)            
+        if f is not None:
             f.close()
-    def dump_preds(self, itr, prefix):
-        """
-        Dump predictions to CSV file on disk for every output layer
-          of the network.
-        prefix: filename prefix s.t. if we have output keys in the form
-          [y1,y2,...] we get CSV files in the format [prefix_y1.csv,
-          prefix_y2.csv, ...]
-        Dump predictions to a CSV file, in the format:
-        p1,p2,...,y, where y = ground truth.
-        """
-        dirname = os.path.dirname(prefix)
-        if not os.path.exists(dirname):
-            os.mkdir(dirname)
-        buf = {}
-        for key in self.l_out.keys:
-            buf[key] = {'ys':[], 'pdist':[]}
-        pbar = tqdm(total=len(itr))
-        for b, (X_batch,y_packet) in enumerate(itr):
-            pbar.update(1)
-            X_batch = X_batch.float()
-            if self.gpu_mode:
-                X_batch = X_batch.cuda()
-            X_batch = Variable(X_batch)
-            outs = self.l_out(X_batch) # log probabilities
-            if y_packet.size()[1] != len(self.l_out.keys):
-                raise Exception("The number of ys returned by the iterator must match "
-                                + "the number of outputs (keys) of the network!!!")
-            for y_idx, y_key in enumerate(self.l_out.keys):
-                pdist_batch = F.softmax(outs[y_key])
-                y_batch = y_packet[:,y_idx].numpy()
-                if buf[y_key]['pdist'] == []:
-                    buf[y_key]['pdist'] = pdist_batch.cpu().data.numpy()
-                else:
-                    buf[y_key]['pdist'] = np.vstack((buf[y_key]['pdist'], pdist_batch.cpu().data.numpy()))
-                buf[y_key]['ys'] = np.hstack((buf[y_key]['ys'], y_batch))
-        pbar.close()
-        for key in self.l_out.keys:
-            preds_matrix = np.hstack((buf[key]['pdist'], buf[key]['ys'][np.newaxis].T))
-            fname = "%s_%s.csv" % (prefix, key)
-            print "Saving prediction file: %s" % fname
-            np.savetxt(fname, preds_matrix, delimiter=",", fmt='%.8f') # 8 dp        
+
     def save(self, filename):
         torch.save(self.l_out.state_dict(), filename)
+
     def load(self, filename, cpu=False):
         if cpu:
             map_location = lambda storage, loc: storage
         else:
             map_location = None
-        self.l_out.load_state_dict(torch.load(filename, map_location=map_location))
+        self.l_out.load_state_dict(torch.load(
+            filename, map_location=map_location))
