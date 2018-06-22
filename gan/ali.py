@@ -13,6 +13,7 @@ class ALI(GAN):
                  opt_g=optim.Adam, opt_d=optim.Adam,
                  opt_d_args={'lr': 0.0002, 'betas': (0.5, 0.999)},
                  opt_g_args={'lr': 0.0002, 'betas': (0.5, 0.999)},
+                 lamb=0.,
                  dnorm=None,
                  handlers=[],
                  scheduler_fn=None,
@@ -31,6 +32,7 @@ class ALI(GAN):
         self.gz = gz
         self.dx = dx
         self.dxz = dxz
+        self.lamb = lamb
         self.optim = {
             'g': optim_g,
             'd': optim_d,
@@ -101,6 +103,9 @@ class ALI(GAN):
         eps.require_grad = False
         z_enc = encoded[:, :self.z_dim] + \
                 encoded[:, self.z_dim:].exp() * eps
+        if self.lamb > 0:
+            x_recon = self.gx(z_enc)
+            recon = torch.mean((x_recon - x)**2)
         dx_true = self.dx(x)
         dx_fake = self.dx(x_fake)
         d_true = self.dxz(torch.cat((dx_true, z_enc), dim=1))
@@ -109,6 +114,8 @@ class ALI(GAN):
         softplus = nn.Softplus()
         loss_d = torch.mean(softplus(-d_true) + softplus(d_fake))
         loss_g = torch.mean(softplus(d_true) + softplus(-d_fake))
+        if self.lamb > 0:
+            loss_g += self.lamb*recon
         # backward & update params
         self.dx.zero_grad()
         self.dxz.zero_grad()
@@ -118,10 +125,13 @@ class ALI(GAN):
         self.gz.zero_grad()
         loss_g.backward()
         self.optim['g'].step()
-        return {
+        losses = {
             'loss_d': loss_d.item(),
             'loss_g': loss_g.item()
-        }, {}
+        }
+        if self.lamb > 0:
+            losses['recon'] = recon.item()
+        return losses, {}
 
     def eval_on_instance(self, z, x, **kawrgs):
         pass
