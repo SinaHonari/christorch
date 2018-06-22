@@ -132,26 +132,18 @@ def test_image_folder(batch_size):
 import torch.utils.data.dataset as dataset
 
 class NumpyDataset(dataset.Dataset):
-    def __init__(self, X, ys, keras_imgen=None, rnd_state=np.random.RandomState(0), reorder_channels=False):
-        """
-        keras_preprocessor: cannot use torchvision PIL transforms, so just use Keras' shit here.
-        reorder_channels: in the event that X is in the form (bs, h, w, f), if this flag is set to
-          True, we will reshape the x batches so that they are in the form (bs, f, h, w). Note that
-          if this is required, you should make sure that the Keras data augmentor knows to use
-          channels_last (TF-style tensors) rather than channels_first.
-        """
+    def __init__(self, X, ys, preprocessor=None, rnd_state=np.random.RandomState(0), reorder_channels=False):
         self.X = X
-        if ys != None:
+        if ys is not None:
             # => we're dealing with classifier iterator
             if type(ys) != list:
                 ys = [ys]
             for y in ys:
                 assert len(y) == len(X)
-        else:
-            pass
         self.ys = ys
         self.N = len(X)
-        self.keras_imgen = keras_imgen
+        #self.keras_imgen = keras_imgen
+        self.preprocessor = preprocessor
         self.rnd_state = rnd_state
         self.reorder_channels = reorder_channels
     def __getitem__(self, index):
@@ -161,12 +153,13 @@ class NumpyDataset(dataset.Dataset):
             for y in self.ys:
                 yy.append(y[index])
             yy = np.asarray(yy)
-        if self.keras_imgen != None:
+        if self.preprocessor is not None:
             seed = self.rnd_state.randint(0, 100000)
-            xx = self.keras_imgen.flow(xx[np.newaxis], None, batch_size=1, seed=seed, shuffle=False).next()[0]
+            #xx = self.keras_imgen.flow(xx[np.newaxis], None, batch_size=1, seed=seed, shuffle=False).next()[0]
+            xx = self.preprocessor(xx)
         if self.reorder_channels:
             xx = xx.swapaxes(2,1).swapaxes(1,0)
-        if self.ys != None:
+        if self.ys is not None:
             return xx, yy
         else:
             return xx

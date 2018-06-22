@@ -184,7 +184,6 @@ class GAN:
                 for handler_fn in self.handlers:
                     handler_fn(losses, (Z_batch, X_batch), outputs,
                                {'epoch':epoch+1, 'iter':b+1, 'mode':'train'})
-                break
             if verbose:
                 pbar.close()
             # Step learning rates.
@@ -234,7 +233,11 @@ class GAN:
             dd['epoch'] = epoch
             torch.save(dd, filename)
 
-    def load(self, filename, legacy=False):
+    def load(self, filename, legacy=False, ignore_d=False):
+        """
+        ignore_d: if `True`, then don't load in the
+          discriminator.
+        """
         if not self.use_cuda:
             map_location = lambda storage, loc: storage
         else:
@@ -243,13 +246,17 @@ class GAN:
             g, d = torch.load(filename,
                               map_location=map_location)
             self.g.load_state_dict(g)
-            self.d.load_state_dict(d)
+            if not ignore_d:
+                self.d.load_state_dict(d)
         else:
             dd = torch.load(filename,
                             map_location=map_location)
             self.g.load_state_dict(dd['g'])
-            self.d.load_state_dict(dd['d'])
+            if not ignore_d:
+                self.d.load_state_dict(dd['d'])
             for key in self.optim:
+                if ignore_d and key == 'd':
+                    continue
                 self.optim[key].load_state_dict(dd['optim_'+key])
             self.last_epoch = dd['epoch']
             
