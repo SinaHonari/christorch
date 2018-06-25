@@ -76,23 +76,24 @@ class ALI(GAN):
         if seed is not None:
             rnd_state = np.random.RandomState(seed)
             z = torch.from_numpy(
-                rnd_state.normal(0, 1, size=(bs, self.z_dim, 1, 1))
+                rnd_state.normal(0, 1, size=(bs, self.z_dim))
             ).float()
         else:
             z = torch.from_numpy(
-                np.random.normal(0, 1, size=(bs, self.z_dim, 1, 1))
+                np.random.normal(0, 1, size=(bs, self.z_dim))
             ).float()
         if self.use_cuda:
             z = z.cuda()
         return z
     
     def prepare_batch(self, x):
+        x = x.float()
+        if self.use_cuda:
+            x = x.cuda()
         return x
         
     def train_on_instance(self, z, x, **kwargs):
         batch_size = x.size(0)
-        if self.use_cuda:
-            x = x.cuda()
         if self.use_cuda:
             z = z.cuda()
         # forward
@@ -100,6 +101,7 @@ class ALI(GAN):
         encoded = self.gz(x) # x -> z'
         # reparameterisation trick
         eps = self.sample_z(batch_size)
+        eps = eps.view(-1, eps.size(1), 1, 1)
         eps.require_grad = False
         z_enc = encoded[:, :self.z_dim] + \
                 encoded[:, self.z_dim:].exp() * eps
@@ -109,7 +111,7 @@ class ALI(GAN):
         dx_true = self.dx(x)
         dx_fake = self.dx(x_fake)
         d_true = self.dxz(torch.cat((dx_true, z_enc), dim=1))
-        d_fake = self.dxz(torch.cat((dx_fake, z), dim=1))
+        d_fake = self.dxz(torch.cat((dx_fake, z.view(-1, z.size(1), 1, 1)), dim=1))
         # compute loss
         softplus = nn.Softplus()
         loss_d = torch.mean(softplus(-d_true) + softplus(d_fake))
