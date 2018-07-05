@@ -23,6 +23,8 @@ class GeneratorX(nn.Module):
         )
 
     def forward(self, x):
+        if len(x.size()) == 2:
+            x = x.view(-1, x.size(1), 1, 1)
         return self.net(x)
 
 class GeneratorZ(nn.Module):
@@ -65,7 +67,9 @@ class DiscriminatorX(nn.Module):
             nn.LeakyReLU(0.02),
 
             nn.Conv2d(zd, zd, 4, 1),
-            nn.LeakyReLU(0.02)
+            nn.LeakyReLU(0.02),
+
+            nn.Sigmoid()
         )
 
     def forward(self, x):
@@ -82,6 +86,8 @@ class DiscriminatorXZ(nn.Module):
             nn.LeakyReLU(0.02),
 
             nn.Conv2d(zd, 1, 1, 1),
+
+            nn.Sigmoid()
         )
 
     def forward(self, x):
