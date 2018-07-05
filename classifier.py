@@ -92,6 +92,9 @@ class Classifier():
             'acc': acc.item()
         }, {'pdist': pdist}
 
+    def predict(self, x):
+        return self.l_out(x)
+
     def _get_stats(self, dict_, mode):
         dd = OrderedDict({})
         for key in dict_:
@@ -183,13 +186,18 @@ class Classifier():
         if f is not None:
             f.close()
 
-    def save(self, filename):
-        torch.save(self.l_out.state_dict(), filename)
+    def save(self, filename, epoch):
+        dd = {}
+        dd['f'] = self.l_out.state_dict()
+        dd['optim'] = self.optim.state_dict()
+        dd['epoch'] = epoch
+        torch.save(dd, filename)
 
     def load(self, filename, cpu=False):
         if cpu:
             map_location = lambda storage, loc: storage
         else:
             map_location = None
-        self.l_out.load_state_dict(torch.load(
-            filename, map_location=map_location))
+        dd = torch.load(filename, map_location=map_location)
+        self.l_out.load_state_dict(dd['f'])
+        self.optim.load_state_dict(dd['optim'])
