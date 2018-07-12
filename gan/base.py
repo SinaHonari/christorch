@@ -4,7 +4,6 @@ import time
 import numpy as np
 from tqdm import tqdm
 from collections import OrderedDict
-from torch.autograd import Variable
 from torch import optim
 from .. import util
 from skimage.io import imsave
@@ -72,7 +71,6 @@ class GAN:
             ).float()
         if self.use_cuda:
             z = z.cuda()
-        z = Variable(z)
         return z
 
     def mse(self, prediction, target):
@@ -80,7 +78,6 @@ class GAN:
             target = torch.ones_like(prediction)*target
             if prediction.is_cuda:
                 target = target.cuda()
-            target = Variable(target)
         return torch.nn.MSELoss()(prediction, target)
 
     def _train(self):
@@ -91,7 +88,7 @@ class GAN:
         self.g.eval()
         self.d.eval()
         
-    def train_on_instance(self, z, x):
+    def train_on_instance(self, z, x, **kwargs):
         self._train()
         # Train the generator.
         self.optim['g'].zero_grad()
@@ -138,12 +135,13 @@ class GAN:
                 c += 1
         imsave(arr=vis, fname=out_file)
     
-    def prepare_batch(self, X_batch):
-        X_batch = X_batch.float()
+    def prepare_batch(self, batch):
+        if len(batch) != 1:
+            raise Exception("Expected batch to only contain one element: X_batch")
+        X_batch = batch[0].float()
         if self.use_cuda:
             X_batch = X_batch.cuda()
-        X_batch = Variable(X_batch)
-        return X_batch
+        return [X_batch]
 
     def train(self,
               itr,
@@ -168,10 +166,12 @@ class GAN:
             if verbose:
                 pbar = tqdm(total=len(itr))
             train_dict = OrderedDict({'epoch': epoch+1})
-            for b, X_batch in enumerate(itr):
-                X_batch = self.prepare_batch(X_batch)
-                Z_batch = self.sample_z(X_batch.size()[0])
-                losses, outputs = self.train_on_instance(Z_batch, X_batch,
+            for b, batch in enumerate(itr):
+                if type(batch) not in [list, tuple]:
+                    batch = [batch]
+                batch = self.prepare_batch(batch)
+                Z_batch = self.sample_z(batch[0].size()[0])
+                losses, outputs = self.train_on_instance(Z_batch, *batch,
                                                          iter=b+1)
                 for key in losses:
                     this_key = 'train_%s' % key
@@ -182,7 +182,7 @@ class GAN:
                 pbar.set_postfix(self._get_stats(train_dict, 'train'))
                 # Process handlers.
                 for handler_fn in self.handlers:
-                    handler_fn(losses, (Z_batch, X_batch), outputs,
+                    handler_fn(losses, [Z_batch] + batch, outputs,
                                {'epoch':epoch+1, 'iter':b+1, 'mode':'train'})
             if verbose:
                 pbar.close()

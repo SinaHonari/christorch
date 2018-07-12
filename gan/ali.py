@@ -123,12 +123,6 @@ class ALI(GAN):
             z = z.cuda()
         return z
     
-    def prepare_batch(self, x):
-        x = x.float()
-        if self.use_cuda:
-            x = x.cuda()
-        return x
-
     def grad_norm(self, d_out, x):
         grad_wrt_x = grad(outputs=d_out, inputs=x,
                           grad_outputs=torch.ones(d_out.size()).cuda(),
