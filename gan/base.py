@@ -6,6 +6,7 @@ from tqdm import tqdm
 from collections import OrderedDict
 from torch import optim
 from .. import util
+from torch.autograd import grad
 from skimage.io import imsave
 
 class GAN:
@@ -20,7 +21,7 @@ class GAN:
                  opt_d=optim.Adam,
                  opt_d_args={'lr':0.0002, 'betas':(0.5, 0.999)},
                  opt_g_args={'lr':0.0002, 'betas':(0.5, 0.999)},
-                 dnorm=None,
+                 dnorm=0.,
                  handlers=[],
                  scheduler_fn=None,
                  scheduler_args={},
@@ -73,13 +74,16 @@ class GAN:
             z = z.cuda()
         return z
 
-    def mse(self, prediction, target):
+    def loss(self, prediction, target):
         if not hasattr(target, '__len__'):
             target = torch.ones_like(prediction)*target
             if prediction.is_cuda:
                 target = target.cuda()
-        return torch.nn.MSELoss()(prediction, target)
-
+        loss = torch.nn.BCELoss()
+        if prediction.is_cuda:
+            loss = loss.cuda()
+        return loss(prediction, target)
+    
     def _train(self):
         self.g.train()
         self.d.train()
@@ -90,24 +94,35 @@ class GAN:
         
     def train_on_instance(self, z, x, **kwargs):
         self._train()
+        x.requires_grad = True
         # Train the generator.
         self.optim['g'].zero_grad()
         fake = self.g(z)
         d_fake = self.d(fake)
-        gen_loss = self.mse(d_fake, 1)
+        gen_loss = self.loss(d_fake, 1)
         gen_loss.backward()
         self.optim['g'].step()
         # Train the discriminator.
         self.optim['d'].zero_grad()
         d_fake = self.d(fake.detach())
         d_real = self.d(x)
-        d_loss = self.mse(d_real, 1) + self.mse(d_fake, 0)
+        d_loss = self.loss(d_real, 1) + self.loss(d_fake, 0)
         d_loss.backward()
         self.optim['d'].step()
+        # Do gradient penalty.
+        if self.dnorm > 0.:
+            d_real = self.d(x)
+            g_norm_x = self.grad_norm(d_real, x)
+            self.optim['d'].zero_grad()
+            (g_norm_x*self.dnorm).backward()
+            self.optim['d'].step()
+        self.optim['d'].zero_grad()
         losses = {
             'g_loss': gen_loss.data.item(),
             'd_loss': d_loss.data.item()
         }
+        if self.dnorm > 0.:
+            losses['dnorm'] = g_norm_x.item()
         outputs = {
             'x': x.detach(),
             'gz': fake.detach(),
@@ -143,6 +158,16 @@ class GAN:
             X_batch = X_batch.cuda()
         return [X_batch]
 
+    def grad_norm(self, d_out, x):
+        grad_wrt_x = grad(outputs=d_out, inputs=x,
+                          grad_outputs=torch.ones(d_out.size()).cuda(),
+                          create_graph=True,
+                          retain_graph=True,
+                          only_inputs=True)[0]
+        g_norm = (grad_wrt_x.view(
+            grad_wrt_x.size()[0], -1).norm(2, 1)**2).mean()
+        return g_norm
+    
     def train(self,
               itr,
               epochs,

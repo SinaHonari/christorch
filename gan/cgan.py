@@ -32,24 +32,35 @@ class CGAN(GAN):
     
     def train_on_instance(self, z, x, y, **kwargs):
         self._train()
+        x.requires_grad = True
         # Train the generator.
         self.optim['g'].zero_grad()
         fake = self.g(z, y)
         d_fake = self.d(fake, y)
-        gen_loss = self.mse(d_fake, 1)
+        gen_loss = self.loss(d_fake, 1)
         gen_loss.backward()
         self.optim['g'].step()
         # Train the discriminator.
         self.optim['d'].zero_grad()
         d_fake = self.d(fake.detach(), y)
         d_real = self.d(x, y)
-        d_loss = self.mse(d_real, 1) + self.mse(d_fake, 0)
+        d_loss = self.loss(d_real, 1) + self.loss(d_fake, 0)
         d_loss.backward()
         self.optim['d'].step()
+        # Do gradient penalty.
+        if self.dnorm > 0.:
+            d_real = self.d(x)
+            g_norm_x = self.grad_norm(d_real, x)
+            self.optim['d'].zero_grad()
+            (g_norm_x*self.dnorm).backward()
+            self.optim['d'].step()
+        self.optim['d'].zero_grad()
         losses = {
             'g_loss': gen_loss.data.item(),
             'd_loss': d_loss.data.item()
         }
+        if self.dnorm > 0.:
+            losses['dnorm'] = g_norm_x.item()
         outputs = {
             'x': x.detach(),
             'gz': fake.detach(),

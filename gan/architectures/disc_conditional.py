@@ -5,7 +5,8 @@ from . import util
 class discriminator(nn.Module):
     # Network Architecture is exactly same as in infoGAN (https://arxiv.org/abs/1606.03657)
     # Architecture : (64)4c2s-(128)4c2s_BL-FC1024_BL-FC1_S
-    def __init__(self, input_width, input_height, input_dim, output_dim, y_dim):
+    def __init__(self, input_width, input_height, input_dim, output_dim, y_dim,
+                 out_nonlinearity=None):
         super(discriminator, self).__init__()
         self.input_height = input_height
         self.input_width = input_width
@@ -24,7 +25,10 @@ class discriminator(nn.Module):
             nn.BatchNorm1d(1024),
             nn.LeakyReLU(0.2)
         )
-        self.final = nn.Linear(1024, self.output_dim)
+        final = [nn.Linear(1024, self.output_dim)]
+        if out_nonlinearity == 'sigmoid':
+            final += [nn.Sigmoid()]
+        self.final = nn.Sequential(*final)
         
         util.initialize_weights(self)
 
