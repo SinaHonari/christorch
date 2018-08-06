@@ -24,7 +24,7 @@ class MnistNet(nn.Module):
     """
     From: https://github.com/pytorch/examples/blob/master/mnist/main.py
     """
-    def __init__(self, in_shp, num_classes):
+    def __init__(self, num_classes):
         super(MnistNet, self).__init__()
         self.features = MnistFeatureExtractor()
         self.classifier = nn.Linear(50, num_classes)
@@ -32,7 +32,7 @@ class MnistNet(nn.Module):
     def forward(self, x):
         x = self.features(x)
         x = F.log_softmax(self.classifier(x))
-        return {'p': x}
+        return x
 
 class MnistNetTwoOutput(nn.Module):
     def __init__(self, in_shp, num_classes):

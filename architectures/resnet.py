@@ -85,19 +85,21 @@ class ResNetCore(nn.Module):
 ######################################
     
 class ResNet(nn.Module):
-    def __init__(self, in_shp, num_classes, kind='18'):
+    def __init__(self, num_classes, kind='18'):
         # in_shp is ignored
         super(ResNet, self).__init__()
         self.features = get_resnet(kind)
-        self.classifier = nn.Linear(512 * self.features.block.expansion, num_classes)
+        self.classifier = nn.Linear(
+            512 * self.features.block.expansion, num_classes)
         self.keys = ['p1']
     def forward(self, x):
         x = self.features(x)
         x = self.classifier(x)
-        return {'p1': F.log_softmax(x)}
+        #return {'p1': F.log_softmax(x)}
+        return F.log_softmax(x)
 
 class ResNetTwoOutput(nn.Module):
-    def __init__(self, in_shp, num_classes, kind='18'):
+    def __init__(self, num_classes, kind='18'):
         # in_shp is ignored
         super(ResNetTwoOutput, self).__init__()
         self.features = get_resnet(kind)
