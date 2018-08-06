@@ -8,6 +8,7 @@ from torch import optim
 from .. import util
 from torch.autograd import grad
 from skimage.io import imsave
+from torchvision.utils import save_image
 
 class GAN:
     """
@@ -22,6 +23,7 @@ class GAN:
                  opt_d_args={'lr':0.0002, 'betas':(0.5, 0.999)},
                  opt_g_args={'lr':0.0002, 'betas':(0.5, 0.999)},
                  dnorm=0.,
+                 update_g_every=1,
                  handlers=[],
                  scheduler_fn=None,
                  scheduler_args={},
@@ -31,6 +33,7 @@ class GAN:
             use_cuda = True if torch.cuda.is_available() else False
         self.z_dim = z_dim
         self.dnorm = dnorm
+        self.update_g_every = update_g_every
         self.g = gen_fn
         self.d = disc_fn
         optim_g = opt_g(filter(lambda p: p.requires_grad,
@@ -100,8 +103,9 @@ class GAN:
         fake = self.g(z)
         d_fake = self.d(fake)
         gen_loss = self.loss(d_fake, 1)
-        gen_loss.backward()
-        self.optim['g'].step()
+        if (kwargs['iter']-1) % self.update_g_every == 0:
+            gen_loss.backward()
+            self.optim['g'].step()
         # Train the discriminator.
         self.optim['d'].zero_grad()
         d_fake = self.d(fake.detach())
@@ -137,8 +141,11 @@ class GAN:
             gz = self.g(z_batch)
         return gz
 
-    def visualise(self, gz_batch, out_file):
+    def visualise(self, batch_size, out_file, seed=None):
         """Save samples g(z) to disk"""
+        if seed is None:
+            seed = np.random.randint(0, 100000)
+        gz_batch = self.sample(batch_size, seed=seed).data.cpu().numpy()
         h, w = gz_batch.shape[-2], gz_batch.shape[-1]
         vis_dim = int(np.floor(np.sqrt(gz_batch.shape[0])))
         vis = np.zeros((vis_dim*h, vis_dim*w, 3))
@@ -175,6 +182,7 @@ class GAN:
               result_dir,
               append=False,
               save_every=1,
+              val_batch_size=None,
               scheduler_fn=None,
               scheduler_args={},
               verbose=True):
@@ -182,6 +190,8 @@ class GAN:
             if folder_name is not None and not os.path.exists(folder_name):
                 os.makedirs(folder_name)
         f_mode = 'w' if not append else 'a'
+        if val_batch_size is None:
+            val_batch_size = itr.batch_size
         f = None
         if result_dir is not None:
             f = open("%s/results.txt" % result_dir, f_mode)
@@ -235,10 +245,9 @@ class GAN:
                           epoch=epoch+1)
             # Save some visualisations. We fix the z for this one
             # so we can monitor the evolution over several epochs.
-            bs = itr.batch_size
-            gz_batch = self.sample(bs, seed=42).data.cpu().numpy()
-            self.visualise(gz_batch,
-                           out_file="%s/samplef_%i.png" % (result_dir, epoch+1))
+            self.visualise(val_batch_size,
+                           out_file="%s/samplef_%i.png" % (result_dir, epoch+1),
+                           seed=42)
             
         if f is not None:
             f.close()
